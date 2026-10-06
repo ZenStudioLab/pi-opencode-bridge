@@ -8,6 +8,14 @@ export function backendFailure(value: unknown): BridgeFailure {
   const error = value && typeof value === "object" ? value as Record<string, unknown> : {};
   const data = error.data && typeof error.data === "object" ? error.data as Record<string, unknown> : error;
   const status = data.statusCode;
+  if (status === 403 && typeof data.responseBody === "string") {
+    try {
+      const body = JSON.parse(data.responseBody);
+      if (body?.error?.type === "FreeTierError") {
+        return new BridgeFailure("access", "OpenCode rejected this request under its free-tier client restriction; no automatic replay was performed.");
+      }
+    } catch { /* Unstructured responses retain the conservative status classification. */ }
+  }
   if (error.name === "ProviderAuthError" || status === 401 || status === 403) {
     return new BridgeFailure("access", "OpenCode provider access denied; check its authentication and model entitlement.");
   }

@@ -12,7 +12,10 @@ import { Type } from "typebox";
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
-test("packed package qualifies through released Pi loader: selection, tools, abort, reload and unload", { timeout: 90_000 }, async (t) => {
+for (const responses of [false, true]) {
+const providerID = responses ? "opencode" : "fixture";
+const modelID = responses ? "muse-spark-1.3-contributor-free" : "probe";
+test(`packed package qualifies through released Pi loader (${responses ? "Responses aliases" : "chat"}): selection, tools, abort, reload and unload`, { timeout: 90_000 }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-bridge-packed-"));
   const environment = { ...process.env };
   const children: ChildProcess[] = [];
@@ -32,8 +35,37 @@ test("packed package qualifies through released Pi loader: selection, tools, abo
     let body = "";
     for await (const chunk of request) body += chunk.toString();
     const payload = JSON.parse(body);
-    requestTools.push((payload.tools ?? []).map((tool: { function?: { name?: string } }) => tool.function?.name ?? "unknown"));
+    requestTools.push((payload.tools ?? []).map((tool: { name?: string; function?: { name?: string } }) => tool.name ?? tool.function?.name ?? "unknown"));
     const tool = [1, 3, 5].includes(++requests);
+    if (responses) {
+      assert.equal(request.url, "/v1/responses");
+      assert.deepEqual(requestTools.at(-1), ["probe"]);
+      if ([2, 4].includes(requests)) {
+        assert.ok(payload.input.some((item: { type: string; name: string }) => item.type === "function_call" && item.name === "probe"));
+        assert.ok(payload.input.some((item: { type: string; output: string }) => item.type === "function_call_output" && item.output.includes("packed result")));
+      }
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      const send = (value: unknown) => response.write(`data: ${JSON.stringify(value)}\n\n`);
+      const info = { id: `resp_${requests}`, object: "response", status: "in_progress", model: modelID, output: [] };
+      send({ type: "response.created", response: info });
+      let item;
+      if (tool) {
+        item = { type: "function_call", id: `fc_${requests}`, call_id: `packed-${requests}`, name: "probe", arguments: "" };
+        send({ type: "response.output_item.added", output_index: 0, item });
+        send({ type: "response.function_call_arguments.delta", item_id: item.id, output_index: 0, delta: "{}" });
+        item = { ...item, arguments: "{}", status: "completed" };
+      } else {
+        item = { type: "message", id: `msg_${requests}`, role: "assistant", status: "in_progress", content: [] };
+        send({ type: "response.output_item.added", output_index: 0, item });
+        send({ type: "response.content_part.added", item_id: item.id, output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } });
+        send({ type: "response.output_text.delta", item_id: item.id, output_index: 0, content_index: 0, delta: "packed done" });
+        item = { ...item, status: "completed", content: [{ type: "output_text", text: "packed done", annotations: [] }] };
+      }
+      send({ type: "response.output_item.done", output_index: 0, item });
+      send({ type: "response.completed", response: { ...info, status: "completed", output: [item], usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 } } } });
+      response.end();
+      return;
+    }
     const delta = tool ? { role: "assistant", tool_calls: [{ index: 0, id: `packed-${requests}`, type: "function", function: { name: "pi_probe", arguments: "{}" } }] }
       : { role: "assistant", content: "packed done" };
     response.writeHead(200, { "content-type": "text/event-stream", connection: "close" });
@@ -65,10 +97,10 @@ test("packed package qualifies through released Pi loader: selection, tools, abo
     await mkdir(agentDir);
     for (const key of Object.keys(process.env)) if (key.startsWith("OPENCODE_") || key.startsWith("XDG_")) delete process.env[key];
     Object.assign(process.env, { HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_DATA_HOME: join(root, "data"),
-      OPENCODE_AUTH_CONTENT: JSON.stringify({ fixture: { type: "api", key: "synthetic" } }),
-      OPENCODE_CONFIG_CONTENT: JSON.stringify({ enabled_providers: ["fixture"], provider: { fixture: {
-        npm: "@ai-sdk/openai-compatible", name: "Fixture", options: { baseURL: `http://127.0.0.1:${address.port}/v1` },
-        models: { probe: { name: "Packed probe", tool_call: true, modalities: { input: ["text"], output: ["text"] }, limit: { context: 16000, output: 2000 } } },
+      OPENCODE_AUTH_CONTENT: JSON.stringify({ [providerID]: { type: "api", key: "synthetic" } }),
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({ enabled_providers: [providerID], provider: { [providerID]: {
+        npm: responses ? "@ai-sdk/openai" : "@ai-sdk/openai-compatible", name: "Fixture", options: { baseURL: `http://127.0.0.1:${address.port}/v1` },
+        models: { [modelID]: { name: "Packed probe", tool_call: true, modalities: { input: ["text"], output: ["text"] }, limit: { context: 16000, output: 2000 } } },
       } } }),
     });
     settings = SettingsManager.inMemory({ packages: [packed], compaction: { enabled: false }, retry: { enabled: false } });
@@ -101,7 +133,7 @@ test("packed package qualifies through released Pi loader: selection, tools, abo
       modelRuntime, sessionManager: SessionManager.inMemory(cwd), tools: ["probe"], thinkingLevel: "off" }));
     t.signal.addEventListener("abort", () => { void session?.abort(); }, { once: true });
     await session.bindExtensions({ onError: (error) => { errors.push(error.error); } });
-    const model = modelRuntime.getModel("opencode-bridge", "fixture/probe");
+    const model = modelRuntime.getModel("opencode-bridge", `${providerID}/${modelID}`);
     assert.ok(model, errors.join("\n"));
     assert.equal(requests, 0);
     await session.setModel(model);
@@ -124,7 +156,7 @@ test("packed package qualifies through released Pi loader: selection, tools, abo
     const previous = [...children];
     await session.reload();
     assert.ok(previous.every((child) => child.exitCode !== null || child.signalCode !== null), "reload must retire all old owned runtimes");
-    const reloaded = modelRuntime.getModel("opencode-bridge", "fixture/probe");
+    const reloaded = modelRuntime.getModel("opencode-bridge", `${providerID}/${modelID}`);
     assert.ok(reloaded);
     await session.setModel(reloaded);
     await session.prompt("Request after released-loader reload.");
@@ -151,3 +183,4 @@ test("packed package qualifies through released Pi loader: selection, tools, abo
     await rm(root, { recursive: true, force: true });
   }
 });
+}

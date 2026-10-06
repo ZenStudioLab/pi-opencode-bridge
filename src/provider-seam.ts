@@ -17,6 +17,7 @@ import { backendContext, imagePart, isAppendCompatible } from "./context.ts";
 import { BRIDGE_AGENT } from "./configuration.ts";
 import { startOwnedRuntime, type OwnedRuntimeOptions } from "./runtime.ts";
 import { createToolRelay, type PendingCall } from "./tool-relay.ts";
+import { startInferenceRelay } from "./inference-relay.ts";
 
 interface Turn {
   queue: PendingCall[];
@@ -72,8 +73,16 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
   if (!agent) { await relay.close(); throw new Error("Bridge agent configuration missing"); }
   agent.tools = { "*": false, ...Object.fromEntries(options.tools.map((tool) => [`pi_${tool.name}`, true])) };
   let runtime: Awaited<ReturnType<typeof startOwnedRuntime>>;
-  try { runtime = await startOwnedRuntime({ ...options, config }); }
-  catch (error) { await relay.close(); throw error; }
+  let inferenceRelay: Awaited<ReturnType<typeof startInferenceRelay>>;
+  try {
+    inferenceRelay = await startInferenceRelay(config, options.tools, options.providerID, options.modelID,
+      { ...process.env, ...options.environment });
+    runtime = await startOwnedRuntime({ ...options, config });
+  } catch (error) {
+    await inferenceRelay?.close();
+    await relay.close();
+    throw error;
+  }
 
   const cancel = (active: Turn): void => {
     if (active.controller.signal.aborted) return;
@@ -212,6 +221,7 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
   } catch (error) {
     eventsController.abort();
     await runtime.close();
+    await inferenceRelay?.close();
     await relay.close();
     throw error;
   }
@@ -391,6 +401,7 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
       await eventPump.catch(() => undefined);
       await runtime.close();
       await turn?.retirement;
+      await inferenceRelay?.close();
       await relay.close();
     },
   };
