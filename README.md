@@ -1,6 +1,6 @@
 # pi-opencode-bridge
 
-A standalone, opt-in Pi provider backed by an owned OpenCode runtime. The minimal provider seam and Wave 2 catalog, streaming, images and retained-context support passed whole-wave review with controlled-runtime tests. Packed-package tests now also pass through released Pi's loader and session lifecycle; final Wave 3 review remains pending. Do not treat this development candidate as a released or exhaustively qualified provider.
+A standalone, opt-in Pi provider backed by an owned OpenCode runtime. The minimal provider seam and Wave 2 catalog, streaming, images and retained-context support passed whole-wave review with controlled-runtime tests. Packed-package tests also pass through released Pi's loader and session lifecycle, and final Wave 3 review is accepted. This is controlled qualification, not an npm release or exhaustive external-provider qualification.
 
 ## Development prerequisites
 
@@ -59,4 +59,4 @@ For one-invocation loading, exit Pi to unload; do not reuse a stale session afte
 
 ## Storage and activation
 
-The source repository is `ZenStudioLab/pi-opencode-bridge`; the toolset stores a reviewed revision as a submodule. Storage does not enable the extension or change Pi settings. Remote/submodule integration and final Wave 3 acceptance are tracked by the parent change. No npm release is published.
+The source repository is `ZenStudioLab/pi-opencode-bridge`; the toolset stores a reviewed revision as a submodule. Storage does not enable the extension or change Pi settings. Private SSH publication, storage-only submodule integration and final Wave 3 acceptance are complete and recorded by the parent change. No npm release is published.
