@@ -18,14 +18,9 @@ export async function loadProviderConfiguration(
   const home = environment.HOME ?? homedir();
   const configHome = join(environment.XDG_CONFIG_HOME ?? join(home, ".config"), "opencode");
   const dataHome = join(environment.XDG_DATA_HOME ?? join(home, ".local", "share"), "opencode");
-  // Bridge-only defaults; explicit operator configuration keeps its normal precedence.
-  let config: Record<string, unknown> = {
-    enabled_providers: ["opencode"],
-    provider: { opencode: { whitelist: [
-      "muse-spark-1.3-contributor-free", "mimo-v2.5-free", "nemotron-3.5-lightning-free",
-      "ling-3.0-flash-fin-free", "big-pickle",
-    ] } },
-  };
+  // Discover eligible models within the operator's configuration. Bridge visibility
+  // is a separate global preference, never an upstream provider/endpoint override.
+  let config: Record<string, unknown> = {};
   let excludedPluginCount = 0;
 
   const mergeSource = async (text: string, source: string, base: string): Promise<void> => {

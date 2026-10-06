@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -96,11 +96,11 @@ test(`packed package qualifies through released Pi loader (${responses ? "Respon
     await mkdir(cwd);
     await mkdir(agentDir);
     for (const key of Object.keys(process.env)) if (key.startsWith("OPENCODE_") || key.startsWith("XDG_")) delete process.env[key];
-    Object.assign(process.env, { HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_DATA_HOME: join(root, "data"),
+    Object.assign(process.env, { HOME: root, PI_CODING_AGENT_DIR: agentDir, XDG_CONFIG_HOME: join(root, "config"), XDG_DATA_HOME: join(root, "data"),
       OPENCODE_AUTH_CONTENT: JSON.stringify({ [providerID]: { type: "api", key: "synthetic" } }),
       OPENCODE_CONFIG_CONTENT: JSON.stringify({ enabled_providers: [providerID], provider: { [providerID]: {
         npm: responses ? "@ai-sdk/openai" : "@ai-sdk/openai-compatible", name: "Fixture", options: { baseURL: `http://127.0.0.1:${address.port}/v1` },
-        models: { [modelID]: { name: "Packed probe", tool_call: true, modalities: { input: ["text"], output: ["text"] }, limit: { context: 16000, output: 2000 } },
+        models: { [modelID]: { name: "Free packed probe", tool_call: true, modalities: { input: ["text"], output: ["text"] }, limit: { context: 16000, output: 2000 } },
           ...(responses ? { "paid-probe": { name: "Paid probe", tool_call: true, cost: { input: 1, output: 2 },
             modalities: { input: ["text"], output: ["text"] }, limit: { context: 16000, output: 2000 } } } : {}),
         },
@@ -135,15 +135,34 @@ test(`packed package qualifies through released Pi loader (${responses ? "Respon
     ({ session } = await createAgentSession({ cwd, agentDir, settingsManager: settings, resourceLoader: loader,
       modelRuntime, sessionManager: SessionManager.inMemory(cwd), tools: ["probe"], thinkingLevel: "off" }));
     t.signal.addEventListener("abort", () => { void session?.abort(); }, { once: true });
-    await session.bindExtensions({ onError: (error) => { errors.push(error.error); } });
+    const choices: string[] = [];
+    await session.bindExtensions({ onError: (error) => { errors.push(error.error); }, mode: "tui", uiContext: {
+      select: async (_title: string, rows: string[]) => {
+        const choice = choices.shift();
+        assert.ok(choice, "unexpected settings dialog");
+        const row = rows.find(value => value === choice || value.includes(`(${choice})`));
+        assert.ok(row, `missing settings choice ${choice}`);
+        return row;
+      },
+      confirm: async () => true,
+      notify: () => {},
+    } as unknown as ExtensionUIContext });
     const model = modelRuntime.getModel("opencode-bridge", `${providerID}/${modelID}`);
     assert.ok(model, errors.join("\n"));
     if (responses) {
-      for (const id of ["mimo-v2.5-free", "nemotron-3.5-lightning-free", "ling-3.0-flash-fin-free", "big-pickle"]) {
+      for (const id of ["mimo-v2.5-free", "nemotron-3.5-lightning-free", "ling-3.0-flash-fin-free"]) {
         assert.ok(modelRuntime.getModel("opencode-bridge", `opencode/${id}`), `${id} must be discoverable without inference`);
       }
       assert.equal(modelRuntime.getModel("opencode-bridge", "opencode/paid-probe"), undefined,
-        "the bridge's default whitelist must hide paid Zen models without a caller-supplied whitelist");
+        "nonmatching paid models must be hidden by default");
+      assert.equal(modelRuntime.getModel("opencode-bridge", "opencode/big-pickle"), undefined);
+      choices.push("Provider: opencode", "mimo-v2.5-free", "paid-probe", "Back", "Save changes");
+      await session.prompt("/opencode-settings");
+      assert.equal(choices.length, 0);
+      assert.equal(modelRuntime.getModel("opencode-bridge", "opencode/mimo-v2.5-free"), undefined);
+      assert.ok(modelRuntime.getModel("opencode-bridge", "opencode/paid-probe"));
+      assert.deepEqual(JSON.parse(await readFile(join(agentDir, "opencode-bridge.json"), "utf8")),
+        { models: { "opencode/mimo-v2.5-free": false, "opencode/paid-probe": true } });
     }
     assert.equal(requests, 0);
     await session.setModel(model);
@@ -168,6 +187,10 @@ test(`packed package qualifies through released Pi loader (${responses ? "Respon
     assert.ok(previous.every((child) => child.exitCode !== null || child.signalCode !== null), "reload must retire all old owned runtimes");
     const reloaded = modelRuntime.getModel("opencode-bridge", `${providerID}/${modelID}`);
     assert.ok(reloaded);
+    if (responses) {
+      assert.equal(modelRuntime.getModel("opencode-bridge", "opencode/mimo-v2.5-free"), undefined);
+      assert.ok(modelRuntime.getModel("opencode-bridge", "opencode/paid-probe"));
+    }
     await session.setModel(reloaded);
     await session.prompt("Request after released-loader reload.");
     assert.equal(session.getLastAssistantText(), "packed done");

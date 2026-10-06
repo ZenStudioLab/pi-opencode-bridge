@@ -5,6 +5,7 @@ export interface CatalogEntry {
   pair: { providerID: string; modelID: string };
   model: Extract<ProviderModelConfig, { maxTokens: number }>;
   pricingReported: boolean;
+  modelName: string;
 }
 
 /** Project only public model metadata; provider options/credentials never leave discovery. */
@@ -18,6 +19,7 @@ export function mapCatalog(catalog: ProviderListResponse): Map<string, CatalogEn
       entries.set(id, {
         pair: { providerID: provider.id, modelID: model.id },
         pricingReported: model.cost !== undefined,
+        modelName: model.name,
         model: {
           id, name: `${provider.name}: ${model.name}${model.cost ? "" : " (pricing unavailable)"}`,
           input: model.capabilities.attachment && model.capabilities.input.image ? ["text", "image"] : ["text"],

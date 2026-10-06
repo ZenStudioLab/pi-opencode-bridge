@@ -53,18 +53,17 @@ test("provider projection preserves JSONC, references and precedence without rea
   }
 });
 
-test("bridge defaults expose selected free Zen models while explicit provider settings retain precedence", async () => {
-  const expected = ["muse-spark-1.3-contributor-free", "mimo-v2.5-free", "nemotron-3.5-lightning-free", "ling-3.0-flash-fin-free", "big-pickle"];
+test("provider projection does not inject discovery filters and preserves explicit operator filters", async () => {
   const home = await mkdtemp(join(tmpdir(), "pi-opencode-defaults-"));
   try {
     const environment = { HOME: home, OPENCODE_AUTH_CONTENT: "{}" };
     const defaults = await loadProviderConfiguration(home, environment);
-    assert.deepEqual(defaults.config.enabled_providers, ["opencode"]);
-    assert.deepEqual(defaults.config.provider?.opencode.whitelist, expected);
+    assert.equal(defaults.config.enabled_providers, undefined);
+    assert.equal(defaults.config.provider, undefined);
     const configured = await loadProviderConfiguration(home, { ...environment,
       OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { opencode: { options: { baseURL: "http://127.0.0.1:9/v1" } } } }),
     });
-    assert.deepEqual(configured.config.provider?.opencode.whitelist, expected);
+    assert.equal(configured.config.provider?.opencode.whitelist, undefined);
     assert.equal(configured.config.provider?.opencode.options?.baseURL, "http://127.0.0.1:9/v1");
     const explicit = await loadProviderConfiguration(home, { ...environment,
       OPENCODE_CONFIG_CONTENT: JSON.stringify({ enabled_providers: ["fixture"],

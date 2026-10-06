@@ -10,15 +10,17 @@ From this package directory, run `yarn typecheck` and `yarn test`. Tests use syn
 
 ## Configuration and authentication boundary
 
-By default, the bridge enables only OpenCode Zen (`opencode`) with these currently free models:
+Models whose ID or display name contains **`free`** (case-insensitive) are shown automatically, across connected OpenCode providers. This replaces the old fixed Zen whitelist. Matching uses the model's name, not the provider's name; for example, Big Pickle now requires explicit enabling because its name does not contain `free`. A name is not a billing guarantee: reported prices remain visible, and external pricing/availability can change.
 
-- Muse Spark 1.3 Contributor Free (`muse-spark-1.3-contributor-free`).
-- MiMo V2.5 Free (`mimo-v2.5-free`).
-- Nemotron 3.5 Lightning Free (`nemotron-3.5-lightning-free`).
-- Ling 3.0 Flash Fin Free (`ling-3.0-flash-fin-free`).
-- Big Pickle (`big-pickle`).
+Run **`/opencode-settings`** to choose a provider and toggle model rows marked `[x]` or `[ ]` with Enter. You can uncheck automatic models or enable additional models, including paid ones; a paid/unknown-price enable requires confirmation. Return with Back, then choose Save changes or Cancel. Reset to automatic defaults clears saved choices only when you save. The command never sends a prompt or changes your selected model; if you hide the current model, choose another before using it.
 
-No environment-variable prefix is needed. These are in-memory extension defaults: they do not edit OpenCode files or hide models registered by Pi's native providers. Explicit OpenCode `enabled_providers` or `provider.opencode.whitelist` settings override the corresponding default; remove such overrides to use this list. The official Zen pricing/catalog and pinned OpenCode catalog were checked before inclusion; this fixed whitelist is not a promise that upstream pricing will never change. Only Muse has passed the approved live bridge smoke; the other four have discovery coverage, not live inference qualification, and may still encounter provider restrictions. Their free-tier terms permit data collection/model improvement; do not assume zero retention or send confidential data without checking the current provider terms.
+Preferences are global across projects in `~/.pi/agent/opencode-bridge.json` (or the agent directory selected by `PI_CODING_AGENT_DIR`). Only explicit per-model visibility booleans are saved—never credentials or prompts. Newly discovered matching models appear automatically, while saved exclusions and additions survive refresh/restart, including temporary model unavailability. Other running sessions pick up changes through `/opencode-refresh` or restart. Concurrent saves use last-save-wins. Malformed settings are reported instead of silently overwritten; correct the file before refreshing.
+
+No environment-variable prefix is needed. Existing OpenCode enabled/disabled-provider and whitelist/blacklist settings remain authoritative discovery limits; remove the earlier single-model environment prefix if you still use it. To add a provider or model not offered in settings, configure/authenticate it in OpenCode, then refresh and enable it here. Only connected text/tool-capable models are eligible; this UI does not create endpoints or qualify OAuth/plugins. Pi-native provider visibility is unchanged, and OpenCode files are not edited.
+
+Only Muse has passed the approved live bridge smoke; other selectable models have discovery coverage, not live inference qualification, and may still encounter provider restrictions. Free-tier terms may permit data collection/model improvement; do not assume zero retention or send confidential data without checking current terms.
+
+`/<name>` may refer to either a registered command or a loaded skill, depending on the active toolset. The two commands above are registered by this extension.
 
 The source reader retains only `provider`, `enabled_providers` and `disabled_providers` from OpenCode JSON/JSONC configuration. It reads global sources, the explicit config file, worktree-local provider definitions, `.opencode` config files, the explicit config directory and process-provided configuration. Later sources override earlier provider fields. Environment/file references are resolved only inside the retained provider subset; excluded instructions are not read or executed.
 

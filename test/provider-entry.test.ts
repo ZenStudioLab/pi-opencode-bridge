@@ -33,14 +33,14 @@ test("provider entry preserves catalog on failed refresh and rejects removed sel
     on(name: string, handler: (...args: unknown[]) => Promise<void>) { handlers.set(name, handler); return () => handlers.delete(name); },
     registerCommand(name: string, command: { handler: (...args: unknown[]) => Promise<void> }) { commands.set(name, command); },
   } as unknown as ExtensionAPI;
-  const ctx = { cwd: home, ui: { notify: (message: string) => notices.push(message) } } as unknown as ExtensionContext;
+  const ctx = { cwd: home, waitForIdle: async () => {}, ui: { notify: (message: string) => notices.push(message) } } as unknown as ExtensionContext;
   try {
     for (const key of Object.keys(process.env)) if (key.startsWith("OPENCODE_") || key.startsWith("XDG_")) delete process.env[key];
-    Object.assign(process.env, { HOME: home, XDG_CONFIG_HOME: join(home, "config"), XDG_DATA_HOME: join(home, "data"),
+    Object.assign(process.env, { HOME: home, PI_CODING_AGENT_DIR: join(home, "pi-agent"), XDG_CONFIG_HOME: join(home, "config"), XDG_DATA_HOME: join(home, "data"),
       OPENCODE_AUTH_CONTENT: JSON.stringify({ fixture: { type: "api", key: "synthetic" } }),
       OPENCODE_CONFIG_CONTENT: JSON.stringify({ enabled_providers: ["fixture"], provider: { fixture: {
         npm: "@ai-sdk/openai-compatible", name: "Fixture", options: { baseURL: `http://127.0.0.1:${address.port}/v1` },
-        models: { probe: { name: "Probe", tool_call: true, modalities: { input: ["text"], output: ["text"] }, limit: { context: 16000, output: 2000 } } },
+        models: { probe: { name: "Free Probe", tool_call: true, modalities: { input: ["text"], output: ["text"] }, limit: { context: 16000, output: 2000 } } },
       } } }),
     });
     register(pi);
