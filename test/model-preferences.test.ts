@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { CatalogEntry } from "../src/catalog.ts";
-import { modelEnabled, readModelPreferences, writeModelPreferences } from "../src/model-preferences.ts";
+import { modelEnabled, readModelPreferences, setProviderPreference, writeModelPreferences, type ModelPreferences } from "../src/model-preferences.ts";
 
 function entry(provider: string, id: string, name = id): CatalogEntry {
   return { pair: { providerID: provider, modelID: id }, modelName: name, pricingReported: true,
@@ -24,22 +24,43 @@ test("automatic matching uses raw model ID/name, with explicit full-pair choices
   assert.equal(preferences.models["a/unavailable"], false);
 });
 
+test("provider rules cover future models while individual exceptions win and bulk changes reset only that provider", () => {
+  const preferences: ModelPreferences = { models: { "a%2Fb/old": false, "a%2Fb/unavailable": true, "a/old": true } };
+  setProviderPreference(preferences, "a/b", true);
+  assert.deepEqual(structuredClone(preferences), { models: { "a/old": true }, providers: { "a/b": true } });
+  assert.equal(modelEnabled(entry("a/b", "future-paid"), preferences), true);
+  preferences.models["a%2Fb/future-paid"] = false;
+  assert.equal(modelEnabled(entry("a/b", "future-paid"), preferences), false);
+  setProviderPreference(preferences, "a/b", false);
+  assert.equal(modelEnabled(entry("a/b", "future-free"), preferences), false);
+  preferences.models["a%2Fb/future-free"] = true;
+  assert.equal(modelEnabled(entry("a/b", "future-free"), preferences), true);
+  setProviderPreference(preferences, "a/b");
+  assert.deepEqual(preferences, { models: { "a/old": true } });
+  assert.equal(modelEnabled(entry("a/b", "future-free"), preferences), true);
+  assert.equal(modelEnabled(entry("a/b", "future-paid"), preferences), false);
+});
+
 test("global preferences persist only explicit choices and failed writes/invalid reads do not erase them", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-model-preferences-"));
   const path = join(root, "agent", "opencode-bridge.json");
   try {
     assert.deepEqual(await readModelPreferences(path), { models: {} });
     assert.deepEqual(await readdir(root), [], "discovery must not create preference files");
-    const preferences = { models: { "a/auto-free": false, "b/paid": true, "c/unavailable": false } };
+    // Existing models-only files remain valid; provider choices add an optional field.
+    await writeModelPreferences({ models: { "legacy/free": false } }, path);
+    assert.deepEqual(await readModelPreferences(path), { models: { "legacy/free": false } });
+    const preferences = { models: { "a/auto-free": false, "b/paid": true, "c/unavailable": false }, providers: { a: true, b: false } };
     await writeModelPreferences(preferences, path);
     const restored = await readModelPreferences(path);
     assert.deepEqual(restored, preferences);
-    assert.equal(modelEnabled(entry("a", "new-free"), restored), true);
+    assert.equal(modelEnabled(entry("a", "new-paid"), restored), true);
+    assert.equal(modelEnabled(entry("b", "new-free"), restored), false);
     const before = await readFile(path, "utf8");
     await assert.rejects(writeModelPreferences({ models: {} }, join(path, "child.json")));
     assert.equal(await readFile(path, "utf8"), before);
     assert.deepEqual(await readdir(join(root, "agent")), ["opencode-bridge.json"]);
-    for (const bad of ['{"secret":"do-not-log" broken}', '{"models":{"a/free":"false"}}', '{"models":[]}']) {
+    for (const bad of ['{"secret":"do-not-log" broken}', '{"models":{"a/free":"false"}}', '{"models":[]}', '{"models":{},"providers":{"a":"false"}}']) {
       await writeFile(path, bad);
       await assert.rejects(readModelPreferences(path), (error: Error) => /Invalid global/.test(error.message) && !error.message.includes("do-not-log"));
       assert.equal(await readFile(path, "utf8"), bad);

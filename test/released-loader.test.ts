@@ -156,13 +156,19 @@ test(`packed package qualifies through released Pi loader (${responses ? "Respon
       assert.equal(modelRuntime.getModel("opencode-bridge", "opencode/paid-probe"), undefined,
         "nonmatching paid models must be hidden by default");
       assert.equal(modelRuntime.getModel("opencode-bridge", "opencode/big-pickle"), undefined);
-      choices.push("Provider: opencode", "mimo-v2.5-free", "paid-probe", "Back", "Save changes");
+      choices.push("Provider: opencode", "Enable whole provider", "mimo-v2.5-free", "Back", "Save changes");
       await session.prompt("/opencode-settings");
       assert.equal(choices.length, 0);
       assert.equal(modelRuntime.getModel("opencode-bridge", "opencode/mimo-v2.5-free"), undefined);
       assert.ok(modelRuntime.getModel("opencode-bridge", "opencode/paid-probe"));
       assert.deepEqual(JSON.parse(await readFile(join(agentDir, "opencode-bridge.json"), "utf8")),
-        { models: { "opencode/mimo-v2.5-free": false, "opencode/paid-probe": true } });
+        { models: { "opencode/mimo-v2.5-free": false }, providers: { opencode: true } });
+      const expanded = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT!);
+      expanded.provider.opencode.models["future-paid"] = { ...expanded.provider.opencode.models["paid-probe"], name: "Future paid model" };
+      process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify(expanded);
+      await session.prompt("/opencode-refresh");
+      assert.ok(modelRuntime.getModel("opencode-bridge", "opencode/future-paid"), "saved provider rule must include new eligible models");
+      assert.equal(modelRuntime.getModel("opencode-bridge", "opencode/mimo-v2.5-free"), undefined);
     }
     assert.equal(requests, 0);
     await session.setModel(model);
@@ -190,6 +196,7 @@ test(`packed package qualifies through released Pi loader (${responses ? "Respon
     if (responses) {
       assert.equal(modelRuntime.getModel("opencode-bridge", "opencode/mimo-v2.5-free"), undefined);
       assert.ok(modelRuntime.getModel("opencode-bridge", "opencode/paid-probe"));
+      assert.ok(modelRuntime.getModel("opencode-bridge", "opencode/future-paid"));
     }
     await session.setModel(reloaded);
     await session.prompt("Request after released-loader reload.");

@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { CatalogEntry } from "./catalog.ts";
-import { modelEnabled, type ModelPreferences } from "./model-preferences.ts";
+import { modelEnabled, setProviderPreference, type ModelPreferences } from "./model-preferences.ts";
 
 function pricingLabel(entry: CatalogEntry): string {
   if (!entry.pricingReported) return "pricing unavailable";
@@ -20,15 +20,29 @@ export async function showModelSettings(
       ["Save changes", "Cancel", "Reset to automatic defaults", ...providerRows]);
     if (choice === undefined || choice === "Cancel") return undefined;
     if (choice === "Save changes") return draft;
-    if (choice === "Reset to automatic defaults") { draft.models = {}; continue; }
+    if (choice === "Reset to automatic defaults") { draft.models = {}; delete draft.providers; continue; }
     const provider = providers[providerRows.indexOf(choice)];
     if (provider === undefined) continue;
     const entries = [...catalog.values()].filter(entry => entry.pair.providerID === provider)
       .sort((a, b) => a.modelName.localeCompare(b.modelName) || a.model.id.localeCompare(b.model.id));
     for (;;) {
       const rows = entries.map(entry => `[${modelEnabled(entry, draft) ? "x" : " "}] ${entry.modelName} (${entry.pair.modelID}) — ${pricingLabel(entry)}`);
-      const selected = await ctx.ui.select(`${provider} — Enter toggles; changes apply only on Save`, ["Back", ...rows]);
+      const rule = draft.providers?.[provider];
+      const mode = rule === undefined ? "automatic" : rule ? "enabled" : "disabled";
+      const selected = await ctx.ui.select(`${provider} (${mode}) — Enter toggles; changes apply only on Save`,
+        ["Back", "Enable whole provider", "Disable whole provider", "Reset provider to automatic", ...rows]);
       if (selected === undefined || selected === "Back") break;
+      if (selected === "Enable whole provider") {
+        if (await ctx.ui.confirm("Enable whole provider?",
+          `Enable all current and future eligible models from ${provider}? This resets its individual choices and may include paid or unknown-price models. Using them may incur charges; enabling sends no prompt.`)) {
+          setProviderPreference(draft, provider, true);
+        }
+        continue;
+      }
+      if (selected === "Disable whole provider" || selected === "Reset provider to automatic") {
+        setProviderPreference(draft, provider, selected === "Disable whole provider" ? false : undefined);
+        continue;
+      }
       const entry = entries[rows.indexOf(selected)];
       if (!entry) continue;
       const enabled = !modelEnabled(entry, draft);
