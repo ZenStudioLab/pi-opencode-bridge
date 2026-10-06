@@ -100,7 +100,10 @@ test(`packed package qualifies through released Pi loader (${responses ? "Respon
       OPENCODE_AUTH_CONTENT: JSON.stringify({ [providerID]: { type: "api", key: "synthetic" } }),
       OPENCODE_CONFIG_CONTENT: JSON.stringify({ enabled_providers: [providerID], provider: { [providerID]: {
         npm: responses ? "@ai-sdk/openai" : "@ai-sdk/openai-compatible", name: "Fixture", options: { baseURL: `http://127.0.0.1:${address.port}/v1` },
-        models: { [modelID]: { name: "Packed probe", tool_call: true, modalities: { input: ["text"], output: ["text"] }, limit: { context: 16000, output: 2000 } } },
+        models: { [modelID]: { name: "Packed probe", tool_call: true, modalities: { input: ["text"], output: ["text"] }, limit: { context: 16000, output: 2000 } },
+          ...(responses ? { "paid-probe": { name: "Paid probe", tool_call: true, cost: { input: 1, output: 2 },
+            modalities: { input: ["text"], output: ["text"] }, limit: { context: 16000, output: 2000 } } } : {}),
+        },
       } } }),
     });
     settings = SettingsManager.inMemory({ packages: [packed], compaction: { enabled: false }, retry: { enabled: false } });
@@ -135,6 +138,8 @@ test(`packed package qualifies through released Pi loader (${responses ? "Respon
     await session.bindExtensions({ onError: (error) => { errors.push(error.error); } });
     const model = modelRuntime.getModel("opencode-bridge", `${providerID}/${modelID}`);
     assert.ok(model, errors.join("\n"));
+    if (responses) assert.equal(modelRuntime.getModel("opencode-bridge", "opencode/paid-probe"), undefined,
+      "the bridge's default whitelist must hide paid Zen models without a caller-supplied whitelist");
     assert.equal(requests, 0);
     await session.setModel(model);
     session.setActiveToolsByName(["probe"]);

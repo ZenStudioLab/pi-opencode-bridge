@@ -18,7 +18,11 @@ export async function loadProviderConfiguration(
   const home = environment.HOME ?? homedir();
   const configHome = join(environment.XDG_CONFIG_HOME ?? join(home, ".config"), "opencode");
   const dataHome = join(environment.XDG_DATA_HOME ?? join(home, ".local", "share"), "opencode");
-  let config: Record<string, unknown> = {};
+  // Bridge-only defaults; explicit operator configuration keeps its normal precedence.
+  let config: Record<string, unknown> = {
+    enabled_providers: ["opencode"],
+    provider: { opencode: { whitelist: ["muse-spark-1.3-contributor-free"] } },
+  };
   let excludedPluginCount = 0;
 
   const mergeSource = async (text: string, source: string, base: string): Promise<void> => {

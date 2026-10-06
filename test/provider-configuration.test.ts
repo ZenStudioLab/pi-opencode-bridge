@@ -53,6 +53,27 @@ test("provider projection preserves JSONC, references and precedence without rea
   }
 });
 
+test("bridge defaults expose only free Muse while explicit provider settings retain precedence", async () => {
+  const home = await mkdtemp(join(tmpdir(), "pi-opencode-defaults-"));
+  try {
+    const environment = { HOME: home, OPENCODE_AUTH_CONTENT: "{}" };
+    const defaults = await loadProviderConfiguration(home, environment);
+    assert.deepEqual(defaults.config.enabled_providers, ["opencode"]);
+    assert.deepEqual(defaults.config.provider?.opencode.whitelist, ["muse-spark-1.3-contributor-free"]);
+    const configured = await loadProviderConfiguration(home, { ...environment,
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { opencode: { options: { baseURL: "http://127.0.0.1:9/v1" } } } }),
+    });
+    assert.deepEqual(configured.config.provider?.opencode.whitelist, ["muse-spark-1.3-contributor-free"]);
+    assert.equal(configured.config.provider?.opencode.options?.baseURL, "http://127.0.0.1:9/v1");
+    const explicit = await loadProviderConfiguration(home, { ...environment,
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({ enabled_providers: ["fixture"],
+        provider: { opencode: { whitelist: ["operator-selected"] } } }),
+    });
+    assert.deepEqual(explicit.config.enabled_providers, ["fixture"]);
+    assert.deepEqual(explicit.config.provider?.opencode.whitelist, ["operator-selected"]);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
 test("invalid provider/auth inputs report a source without exposing parser excerpts", async () => {
   const home = await mkdtemp(join(tmpdir(), "pi-opencode-source-"));
   try {

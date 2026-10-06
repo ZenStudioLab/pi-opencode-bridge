@@ -10,6 +10,8 @@ From this package directory, run `yarn typecheck` and `yarn test`. Tests use syn
 
 ## Configuration and authentication boundary
 
+By default, the bridge enables only OpenCode Zen (`opencode`) and whitelists only the tested free model `muse-spark-1.3-contributor-free`. No environment-variable prefix is needed. These are in-memory extension defaults: they do not edit OpenCode files or hide models registered by Pi's native providers. Explicit OpenCode `enabled_providers` or `provider.opencode.whitelist` settings override the corresponding default; remove such overrides to use the free-Muse-only default. This fixed whitelist is not a promise that upstream pricing will never change.
+
 The source reader retains only `provider`, `enabled_providers` and `disabled_providers` from OpenCode JSON/JSONC configuration. It reads global sources, the explicit config file, worktree-local provider definitions, `.opencode` config files, the explicit config directory and process-provided configuration. Later sources override earlier provider fields. Environment/file references are resolved only inside the retained provider subset; excluded instructions are not read or executed.
 
 API authentication from OpenCode's existing `auth.json` or `OPENCODE_AUTH_CONTENT` is read into memory and passed only to the owned child environment. Existing environment credentials remain available to OpenCode. The child uses temporary HOME/XDG paths, process-only configuration/authentication and a minimal agent with all native tools disabled. Source files are not rewritten, authentication is not copied to disk or Pi's credential store, and raw backend diagnostics are not forwarded. Owned resources are closed on failure/shutdown; unrelated OpenCode servers are not attached to or stopped.
