@@ -21,7 +21,10 @@ export async function loadProviderConfiguration(
   // Bridge-only defaults; explicit operator configuration keeps its normal precedence.
   let config: Record<string, unknown> = {
     enabled_providers: ["opencode"],
-    provider: { opencode: { whitelist: ["muse-spark-1.3-contributor-free"] } },
+    provider: { opencode: { whitelist: [
+      "muse-spark-1.3-contributor-free", "mimo-v2.5-free", "nemotron-3.5-lightning-free",
+      "ling-3.0-flash-fin-free", "big-pickle",
+    ] } },
   };
   let excludedPluginCount = 0;
 

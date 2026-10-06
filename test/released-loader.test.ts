@@ -138,8 +138,13 @@ test(`packed package qualifies through released Pi loader (${responses ? "Respon
     await session.bindExtensions({ onError: (error) => { errors.push(error.error); } });
     const model = modelRuntime.getModel("opencode-bridge", `${providerID}/${modelID}`);
     assert.ok(model, errors.join("\n"));
-    if (responses) assert.equal(modelRuntime.getModel("opencode-bridge", "opencode/paid-probe"), undefined,
-      "the bridge's default whitelist must hide paid Zen models without a caller-supplied whitelist");
+    if (responses) {
+      for (const id of ["mimo-v2.5-free", "nemotron-3.5-lightning-free", "ling-3.0-flash-fin-free", "big-pickle"]) {
+        assert.ok(modelRuntime.getModel("opencode-bridge", `opencode/${id}`), `${id} must be discoverable without inference`);
+      }
+      assert.equal(modelRuntime.getModel("opencode-bridge", "opencode/paid-probe"), undefined,
+        "the bridge's default whitelist must hide paid Zen models without a caller-supplied whitelist");
+    }
     assert.equal(requests, 0);
     await session.setModel(model);
     session.setActiveToolsByName(["probe"]);

@@ -10,7 +10,15 @@ From this package directory, run `yarn typecheck` and `yarn test`. Tests use syn
 
 ## Configuration and authentication boundary
 
-By default, the bridge enables only OpenCode Zen (`opencode`) and whitelists only the tested free model `muse-spark-1.3-contributor-free`. No environment-variable prefix is needed. These are in-memory extension defaults: they do not edit OpenCode files or hide models registered by Pi's native providers. Explicit OpenCode `enabled_providers` or `provider.opencode.whitelist` settings override the corresponding default; remove such overrides to use the free-Muse-only default. This fixed whitelist is not a promise that upstream pricing will never change.
+By default, the bridge enables only OpenCode Zen (`opencode`) with these currently free models:
+
+- Muse Spark 1.3 Contributor Free (`muse-spark-1.3-contributor-free`).
+- MiMo V2.5 Free (`mimo-v2.5-free`).
+- Nemotron 3.5 Lightning Free (`nemotron-3.5-lightning-free`).
+- Ling 3.0 Flash Fin Free (`ling-3.0-flash-fin-free`).
+- Big Pickle (`big-pickle`).
+
+No environment-variable prefix is needed. These are in-memory extension defaults: they do not edit OpenCode files or hide models registered by Pi's native providers. Explicit OpenCode `enabled_providers` or `provider.opencode.whitelist` settings override the corresponding default; remove such overrides to use this list. The official Zen pricing/catalog and pinned OpenCode catalog were checked before inclusion; this fixed whitelist is not a promise that upstream pricing will never change. Only Muse has passed the approved live bridge smoke; the other four have discovery coverage, not live inference qualification, and may still encounter provider restrictions. Their free-tier terms permit data collection/model improvement; do not assume zero retention or send confidential data without checking the current provider terms.
 
 The source reader retains only `provider`, `enabled_providers` and `disabled_providers` from OpenCode JSON/JSONC configuration. It reads global sources, the explicit config file, worktree-local provider definitions, `.opencode` config files, the explicit config directory and process-provided configuration. Later sources override earlier provider fields. Environment/file references are resolved only inside the retained provider subset; excluded instructions are not read or executed.
 
