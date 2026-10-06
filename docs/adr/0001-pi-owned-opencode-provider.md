@@ -1,0 +1,26 @@
+# ADR-0001: Pi-owned OpenCode provider
+
+## Status
+
+Proposed implementation; architecture selected, relay and configuration boundary unqualified. Expansion requires the owning change's Wave 1 runtime gate and caller-owned review PASS.
+
+## Context
+
+The standalone bridge lets operator-installed Pi sessions select OpenCode-configured models without delegating tool execution or conversation ownership to OpenCode. Both runtimes can execute tools and maintain history, so their authority must be explicit. Tool operations can have filesystem effects, and provider configuration can contain credentials or executable integrations.
+
+The owning plan is [add-pi-opencode-bridge](../../../../openspec/changes/add-pi-opencode-bridge/proposal.md) in the parent `ZenStudioLab/pi-toolset` checkout. That link resolves in the intended submodule layout; outside that layout, use the change id and parent repository to locate it. This ADR records the architecture, not a second implementation plan.
+
+## Decision
+
+- Keep this package in an independent repository, ultimately `git@github.com:ZenStudioLab/pi-opencode-bridge.git`, with a reviewed gitlink at `pi-toolset/extensions/pi-opencode-bridge/`. Storage does not activate it or change root dependencies, exports, or Pi settings.
+- Launch a dedicated owned loopback OpenCode runtime and MCP endpoint only when explicitly loaded. Never attach to or terminate unrelated processes. Release owned resources on cancellation, partial startup, unload, or shutdown as applicable.
+- Let OpenCode own provider authentication, while retaining only the provider/authentication configuration needed for inference. Do not rewrite user-owned configuration, environment, or credential files or persist credentials in Pi's store or other copies. Necessary provider/auth material may be read into memory and passed only through supported owned-child environment inputs, including `OPENCODE_AUTH_CONTENT`; owned temporary HOME/XDG paths exclude unrelated configuration without persisting authentication. Discard the snapshot on shutdown and never log raw material. OAuth refresh and necessary auth plugins remain unqualified until their no-user-file-write behavior is demonstrated. Unrelated prompts, native tools, agents, and MCP endpoints must not participate.
+- Let Pi own actual tool execution, hooks, and results. An accepted MCP request becomes a pending Pi tool call; Pi's ordinary loop executes it, and the matching result settles the backend request. Observational backend events do not authorize execution. Distinct calls retain distinct identities. Each MCP request is one Pi handoff segment; backend-parallel calls execute serially through successive segments. The user approved this architectural tradeoff after the pinned AI SDK/source and public-event probe showed whole-step completion waits for tool results. Do not use time-based batching; tools requiring concurrent sibling execution are unsupported.
+- Let Pi own retained context and recovery. Backend sessions are replaceable continuations, not an independent source of truth. Disable automatic backend compaction/pruning and suppress title inference with explicit session titles. Failed effectful generations must not retry or repeat Pi tool operations.
+- Qualify released unpatched Pi 1.0.4 with installed OpenCode 1.18.29 first, using a deterministic local model fixture. Pi 1.0.4 is the latest published release selected by the user, replacing the earlier proposed 0.99.2 target. Pin exact qualification/development versions rather than a floating latest tag; leave the global Pi CLI and root dependencies unchanged. These versions are proposed, not tested compatibility claims. Refresh Pi-specific dependency/API evidence before acquisition/execution; dependency acquisition and any later paid-provider check require their own approval boundaries.
+
+## Consequences
+
+This preserves Pi's visible tool lifecycle and avoids coupling the toolset to bridge dependencies. It adds an owned server and a pending-result handoff. Single-request segmentation avoids the whole-batch completion deadlock but loses parallel tool execution and splits backend turns across Pi segments. Selective configuration may also be impossible through the pinned public APIs.
+
+The first real-runtime gate must demonstrate configuration isolation, deterministic single-request segmentation of parallel backend calls, exactly-once Pi execution, cancellation, and retry retirement. If the public surface cannot enforce these, stop and amend the owning change; do not patch either host, execute tools directly, or substitute delegation. Until that evidence exists, no runtime qualification or authentication-integration support is claimed.
