@@ -183,12 +183,17 @@ test(`remote abort ${failureMode} retires the owned runtime without contaminatin
 
 }
 
-test("loss of the event channel between turns prevents unmonitored inference", { timeout: 30_000 }, async (t) => {
+for (const change of ["disconnect", "compaction"] as const) {
+test(`backend ${change} between turns prevents stale inference`, { timeout: 30_000 }, async (t) => {
   let events: IncomingMessage | undefined;
+  let sessionID: string | undefined;
   const original = http.request;
   t.mock.method(http, "request", (...args: Parameters<typeof original>) => {
     const request = original(...args);
-    if (args[0] instanceof URL && args[0].pathname === "/event") request.once("response", (response) => { events = response; });
+    if (args[0] instanceof URL) {
+      if (args[0].pathname === "/event") request.once("response", (response) => { events = response; });
+      sessionID ??= args[0].pathname.match(/^\/session\/([^/]+)\/message$/)?.[1];
+    }
     return request;
   });
   syncBuiltinESMExports();
@@ -197,15 +202,21 @@ test("loss of the event channel between turns prevents unmonitored inference", {
     f = await fixture((response) => reply(response));
     assert.equal((await f.seam.streamSimple(model, context("First turn")).result()).stopReason, "stop");
     assert.ok(events);
-    events.destroy(new Error("Controlled monitor disconnect"));
+    if (change === "disconnect") events.destroy(new Error("Controlled monitor disconnect"));
+    else {
+      assert.ok(sessionID);
+      events.push(Buffer.from(`data: ${JSON.stringify({ type: "session.compacted", properties: { sessionID } })}\n\n`));
+    }
     // Let the transport rejection reach its event consumer; this is not a tool batching timer.
     await new Promise<void>((resolve) => setImmediate(resolve));
     const result = await f.seam.streamSimple(model, context("Next turn")).result();
     assert.equal(result.stopReason, "error");
-    assert.equal(f.requests(), 1, "a dead monitor must prevent any later model request");
+    assert.equal(f.requests(), 1, "unavailable monitoring or changed backend history prevents later inference");
+    if (change === "compaction") assert.match(result.errorMessage!, /history changed/);
   } finally {
     await f?.close();
     t.mock.restoreAll();
     syncBuiltinESMExports();
   }
 });
+}

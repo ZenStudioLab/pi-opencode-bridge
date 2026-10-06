@@ -1,16 +1,19 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { fetchRuntime } from "./runtime-http.ts";
 import {
   createAssistantMessageEventStream,
-  getCurrentSystemPrompt,
   type AssistantMessage,
   type Model,
+  type Message,
   type SimpleStreamOptions,
   type StreamFunction,
   type Tool,
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import type { Config } from "@opencode-ai/sdk";
+import { backendFailure, BridgeFailure } from "./failure.ts";
+import { GenerationStream } from "./stream.ts";
+import { backendContext, imagePart, isAppendCompatible } from "./context.ts";
 import { BRIDGE_AGENT } from "./configuration.ts";
 import { startOwnedRuntime, type OwnedRuntimeOptions } from "./runtime.ts";
 import { createToolRelay, type PendingCall } from "./tool-relay.ts";
@@ -22,7 +25,13 @@ interface Turn {
   session?: string;
   done: boolean;
   error?: Error;
-  text: string;
+  output: GenerationStream;
+  finish: "stop" | "length";
+  requestID: string;
+  assistantIDs: Set<string>;
+  observe?: (event: unknown) => Promise<void>;
+  observations: Promise<void>;
+  observationsClosed: boolean;
   userKey: string;
   controller: AbortController;
   abortBindings: Set<() => void>;
@@ -38,6 +47,7 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
   let turn: Turn | undefined;
   let closed = false;
   let monitored = true;
+  let unavailableReason = "OpenCode runtime monitoring or retirement failed; reload the bridge before a new request.";
   let segmentBusy = false;
   const waiting = new Set<() => void>();
   const notify = (): void => { for (const wake of waiting) wake(); };
@@ -50,6 +60,7 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
     if (signal?.aborted) abort();
   });
   let failedContext: string | undefined;
+  let retained: { session: string; messages: Message[] } | undefined;
   const relay = await createToolRelay(options.tools, (call) => {
     if (!turn || turn.done || turn.controller.signal.aborted) { call.cancel(); return; }
     turn.queue.push(call);
@@ -66,6 +77,7 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
 
   const cancel = (active: Turn): void => {
     if (active.controller.signal.aborted) return;
+    retained = undefined;
     active.controller.abort();
     for (const remove of active.abortBindings) remove();
     active.abortBindings.clear();
@@ -106,6 +118,22 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
     if (signal.aborted) abort();
   };
 
+  const observe = (active: Turn, event: unknown, apply: () => void): void => {
+    if (active.observationsClosed) return;
+    // Instrumentation is ordered and precedes normalization, but never blocks
+    // the independent reader responsible for retry/cancellation supervision.
+    active.observations = active.observations.then(async () => {
+      if (active.controller.signal.aborted) return;
+      await active.observe?.(event);
+      if (active.controller.signal.aborted) return;
+      apply();
+      active.wake?.();
+    }).catch(() => {
+      cancel(active);
+      active.error = new BridgeFailure("stream", "OpenCode stream observation or normalization failed; no automatic replay was performed.");
+    });
+  };
+
   // The public retry transition precedes OpenCode's delay/retry. Retire the entire generation,
   // including queued handoffs, before allowing any further Pi execution.
   const eventsController = new AbortController();
@@ -129,9 +157,41 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
           if (!data) continue;
           const event = JSON.parse(data);
           if (event.type === "server.connected") ready();
+          const changedSession = event.properties?.sessionID ?? event.properties?.part?.sessionID;
+          const transformed = ["session.compacted", "message.removed", "message.part.removed"].includes(event.type) ||
+            event.properties?.part?.type === "compaction" || event.properties?.part?.state?.time?.compacted;
+          if (transformed && changedSession && (changedSession === turn?.session || changedSession === retained?.session)) {
+            retained = undefined;
+            monitored = false;
+            unavailableReason = "OpenCode backend history changed unexpectedly; reload the bridge to rebuild Pi-owned context.";
+            if (turn) cancel(turn);
+            notify();
+          }
+          const active = turn;
+          if (active?.session && !active.done) {
+            const info = event.properties?.info;
+            const part = event.properties?.part;
+            if (info?.sessionID === active.session && info.role === "assistant" && info.parentID === active.requestID) {
+              active.assistantIDs.add(info.id);
+              observe(active, event, () => {
+                if (info.tokens && info.time?.completed) active.output.account(info.id, { input: info.tokens.input, output: info.tokens.output,
+                  cacheRead: info.tokens.cache?.read ?? 0, cacheWrite: info.tokens.cache?.write ?? 0, cost: info.cost ?? 0 });
+              });
+            }
+            if (event.type === "message.part.delta" && event.properties.sessionID === active.session &&
+                active.assistantIDs.has(event.properties.messageID) && event.properties.field === "text") {
+              observe(active, event, () => active.output.delta(event.properties.partID, event.properties.delta));
+            }
+            if (part?.sessionID === active.session && active.assistantIDs.has(part.messageID)) {
+              if (part.type === "text" || part.type === "reasoning") {
+                observe(active, event, () => active.output.snapshot(part.id, part.type === "text" ? "text" : "thinking", part.text));
+              }
+            }
+          }
           if (turn && event.properties?.sessionID === turn.session &&
               ((event.type === "session.status" && event.properties.status?.type === "retry") || event.type === "session.error")) {
             cancel(turn);
+            turn.error = backendFailure(event.properties.error ?? event.properties.status);
           }
         }
       }
@@ -157,31 +217,65 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
   }
 
   const begin = (model: Model<string>, context: TranscriptContext, streamOptions: SimpleStreamOptions): Turn => {
-    const active: Turn = { queue: [], done: false, text: "", userKey: JSON.stringify([...context.messages].reverse().find((message) => message.role === "user")), controller: new AbortController(), abortBindings: new Set() };
+    const active: Turn = { queue: [], done: false, observations: Promise.resolve(), observationsClosed: false, output: new GenerationStream(), finish: "stop", requestID: `msg_${randomUUID().replaceAll("-", "")}`, assistantIDs: new Set(),
+      observe: streamOptions.onProviderStreamEvent ? async (event) => { await streamOptions.onProviderStreamEvent!(event, model); } : undefined,
+      userKey: JSON.stringify([...context.messages].reverse().find((message) => message.role === "user")), controller: new AbortController(), abortBindings: new Set() };
     bindAbort(active, streamOptions.signal);
     void (async () => {
       try {
-        const session = await runtime.client.session.create({ body: { title: "Pi bridge inference" }, throwOnError: true, signal: active.controller.signal });
-        active.session = session.data.id;
-        // Wave 1 starts a fresh session; authoritative retained-role replay is implemented in Wave 2.
-        const user = [...context.messages].reverse().find((message) => message.role === "user");
-        const text = user && (typeof user.content === "string" ? user.content : user.content.filter((part) => part.type === "text").map((part) => part.text).join("\n"));
+        const compatible = retained && isAppendCompatible(retained.messages, context.messages);
+        const prompt = backendContext(context, model.input.includes("image"), !!compatible);
+        active.session = compatible ? retained!.session : (await runtime.client.session.create({
+          body: { title: "Pi bridge inference" }, throwOnError: true, signal: active.controller.signal,
+        })).data.id;
         const body = {
           model: { providerID: options.providerID, modelID: options.modelID },
-          agent: BRIDGE_AGENT,
-          system: getCurrentSystemPrompt(context.messages),
-          parts: [{ type: "text" as const, text: text || "Continue." }],
+          agent: BRIDGE_AGENT, messageID: active.requestID, ...prompt,
         };
         const replacement = await streamOptions.onPayload?.(body, model);
         const response = await runtime.client.session.prompt({
-          path: { id: session.data.id }, body: (replacement ?? body) as typeof body,
+          path: { id: active.session }, body: (replacement ?? body) as typeof body,
           throwOnError: true, signal: active.controller.signal,
+          fetch: async (request) => {
+            const response = await fetchRuntime(request);
+            await streamOptions.onResponse?.({ status: response.status, headers: Object.fromEntries(response.headers) }, model);
+            return response;
+          },
         });
-        if (response.data.info.error) throw new Error("OpenCode inference failed");
-        active.text = response.data.parts.filter((part) => part.type === "text").map((part) => part.text).join("");
+        if (response.data.info.error) throw backendFailure(response.data.info.error);
+        active.finish = response.data.info.finish === "length" ? "length" : "stop";
+        active.observationsClosed = true;
+        // Only final success waits for observers; cancellation remains responsive.
+        await new Promise<void>((resolve, reject) => {
+          const abort = (): void => { cleanup(); reject(active.error ?? new Error("Pi request aborted")); };
+          const cleanup = (): void => active.controller.signal.removeEventListener("abort", abort);
+          active.controller.signal.addEventListener("abort", abort, { once: true });
+          active.observations.then(() => { cleanup(); resolve(); }, (error) => { cleanup(); reject(error); });
+          if (active.controller.signal.aborted) abort();
+        });
+        // Prompt returns only the final assistant. Persisted request-owned history
+        // is the completion boundary for all earlier steps, independent of SSE lag.
+        const history = await runtime.client.session.messages({ path: { id: active.session },
+          throwOnError: true, signal: active.controller.signal });
+        const ownedMessages = history.data.filter((entry) => entry.info.role === "assistant" && entry.info.parentID === active.requestID)
+          .sort((a, b) => a.info.time.created - b.info.time.created || a.info.id.localeCompare(b.info.id));
+        if (!ownedMessages.some((entry) => entry.info.id === response.data.info.id)) throw new BridgeFailure("stream", "OpenCode completed history is unavailable; no automatic replay was performed.");
+        const content: { id: string; kind: "text" | "thinking" | "tool"; text: string }[] = [];
+        for (const entry of ownedMessages) {
+          const info = entry.info;
+          if (info.role !== "assistant") continue;
+          if (info.error) throw backendFailure(info.error);
+          active.output.account(info.id, { input: info.tokens.input, output: info.tokens.output,
+            cacheRead: info.tokens.cache.read, cacheWrite: info.tokens.cache.write, cost: info.cost });
+          for (const part of entry.parts) if (part.type === "text" || part.type === "reasoning" || part.type === "tool") {
+            content.push({ id: part.id, kind: part.type === "reasoning" ? "thinking" : part.type, text: part.type === "tool" ? "" : part.text });
+          }
+        }
+        active.output.reconcile(content);
       } catch (error) {
+        const failure = active.error instanceof BridgeFailure ? active.error : error instanceof Error ? error : new Error("OpenCode inference failed");
         cancel(active);
-        active.error = error instanceof Error ? error : new Error("OpenCode inference failed");
+        active.error = failure;
       } finally {
         active.done = true;
         active.wake?.();
@@ -201,6 +295,7 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
     };
     void (async () => {
       let owned: Turn | undefined;
+      let started = false;
       try {
         if (closed || !monitored) throw new Error("OpenCode bridge is unavailable");
         const fingerprint = createHash("sha256").update(JSON.stringify(context.messages)).digest("hex");
@@ -217,6 +312,10 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
             segmentBusy = true;
             bindAbort(owned, streamOptions.signal);
             if (owned.error) throw owned.error;
+            for (const part of result.content) if (part.type === "image") {
+              if (!model.input.includes("image")) throw new BridgeFailure("unsupported", "OpenCode bridge selected model does not support image results");
+              imagePart(part.data, part.mimeType, 0);
+            }
             const call = owned.emitted!;
             owned.emitted = undefined;
             call.settle(result);
@@ -237,33 +336,40 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
         }
         const active = owned;
         stream.push({ type: "start", partial: message });
+        started = true;
         while (!active.queue.length && !active.done) {
+          active.output.flush(message, (event) => stream.push(event));
           await new Promise<void>((resolve) => { active.wake = resolve; });
           active.wake = undefined;
         }
         if (active.error) throw active.error;
+        active.output.finish(message, (event) => stream.push(event));
         const call = active.queue.shift();
         if (call) {
+          active.output.handoff();
           active.emitted = call;
+          const contentIndex = message.content.length;
           message.content.push(call.call);
           message.stopReason = "toolUse";
-          stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
-          stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: call.call, partial: message });
-        } else {
-          message.content.push({ type: "text", text: active.text });
-          stream.push({ type: "text_start", contentIndex: 0, partial: message });
-          stream.push({ type: "text_delta", contentIndex: 0, delta: active.text, partial: message });
-          stream.push({ type: "text_end", contentIndex: 0, content: active.text, partial: message });
+          stream.push({ type: "toolcall_start", contentIndex, partial: message });
+          stream.push({ type: "toolcall_end", contentIndex, toolCall: call.call, partial: message });
         }
-        stream.push({ type: "done", reason: call ? "toolUse" : "stop", message });
-        if (!call && turn === active) turn = undefined;
-      } catch {
+        if (!call) message.stopReason = active.finish;
+        stream.push({ type: "done", reason: call ? "toolUse" : active.finish, message });
+        if (!call && turn === active) {
+          if (active.session) retained = { session: active.session, messages: structuredClone([...context.messages, message]) };
+          turn = undefined;
+        }
+      } catch (error) {
         if (owned) {
+          if (started) owned.output.finish(message, (event) => stream.push(event));
           failedContext = createHash("sha256").update(JSON.stringify(context.messages)).digest("hex");
           cancel(owned);
         }
         message.stopReason = streamOptions.signal?.aborted ? "aborted" : "error";
-        message.errorMessage = message.stopReason === "aborted" ? "Pi request aborted" : "OpenCode bridge request failed; no automatic replay was performed";
+        message.errorMessage = message.stopReason === "aborted" ? "Pi request aborted" : error instanceof BridgeFailure
+          ? error.message : !monitored ? unavailableReason
+          : "OpenCode bridge request failed; no automatic replay was performed";
         stream.push({ type: "error", reason: message.stopReason, error: message });
       } finally {
         if (owned) segmentBusy = false;
