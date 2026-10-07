@@ -63,7 +63,6 @@ test("production isolation retains provider-only auth without native tools or au
       XDG_CONFIG_HOME: join(testHome, "config"),
       XDG_DATA_HOME: join(testHome, "data"),
     });
-    assert.equal(inherited.excludedPluginCount, 1);
     assert.deepEqual(inherited.unavailableAuthProviders, []);
 
     runtime = await withPhaseTimeout(

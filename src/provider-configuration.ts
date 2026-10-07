@@ -7,7 +7,6 @@ export interface ProviderConfiguration {
   config: Config;
   authentication: Record<string, unknown>;
   unavailableAuthProviders: string[];
-  excludedPluginCount: number;
 }
 
 /** Read data, not OpenCode's config loader: that loader can execute unrelated plugins. */
@@ -21,11 +20,9 @@ export async function loadProviderConfiguration(
   // Discover eligible models within the operator's configuration. Bridge visibility
   // is a separate global preference, never an upstream provider/endpoint override.
   let config: Record<string, unknown> = {};
-  let excludedPluginCount = 0;
 
   const mergeSource = async (text: string, source: string, base: string): Promise<void> => {
     const parsed = parseObject(text, source);
-    if (Array.isArray(parsed.plugin)) excludedPluginCount += parsed.plugin.length;
     const retained: Record<string, unknown> = {};
     for (const key of ["provider", "enabled_providers", "disabled_providers"]) {
       if (parsed[key] !== undefined) retained[key] = await expandReferences(parsed[key], base, home, environment);
@@ -76,7 +73,7 @@ export async function loadProviderConfiguration(
       ...unavailableAuthProviders,
     ])];
   }
-  return { config: config as Config, authentication, unavailableAuthProviders, excludedPluginCount };
+  return { config: config as Config, authentication, unavailableAuthProviders };
 }
 
 async function optionalRead(file: string): Promise<string | undefined> {

@@ -74,7 +74,6 @@ export default function registerPiOpenCodeBridge(pi: ExtensionAPI): void {
       stage = "provider configuration";
       const nextInherited = await loadProviderConfiguration(ctx.cwd);
       if (nextInherited.unavailableAuthProviders.length) ctx.ui.notify(`OpenCode bridge cannot retain unqualified OAuth/remote authentication for: ${nextInherited.unavailableAuthProviders.join(", ")}`, "warning");
-      if (nextInherited.excludedPluginCount) ctx.ui.notify("OpenCode bridge excludes configured plugins; integrations requiring them are not qualified.", "warning");
       // Discovery has no tools/inference. Its owned runtime closes before the inference runtime starts.
       stage = "owned runtime startup";
       const discovery = await startOwnedRuntime({ config: createSelectiveConfiguration(undefined, nextInherited.config), authentication: nextInherited.authentication });

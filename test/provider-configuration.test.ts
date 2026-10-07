@@ -42,7 +42,6 @@ test("provider projection preserves JSONC, references and precedence without rea
     assert.equal(result.config.instructions, undefined);
     assert.equal(result.config.mcp, undefined);
     assert.equal(result.config.plugin, undefined);
-    assert.equal(result.excludedPluginCount, 1);
     assert.deepEqual(result.unavailableAuthProviders, ["oauth"]);
     assert.deepEqual(result.config.disabled_providers, ["oauth"]);
     assert.deepEqual(result.authentication, { fixture: { type: "api", key: "synthetic-api-key" } });
