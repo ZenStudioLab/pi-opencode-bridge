@@ -2,6 +2,13 @@
 
 A standalone, opt-in Pi provider backed by an owned OpenCode runtime. The minimal provider seam and Wave 2 catalog, streaming, images and retained-context support passed whole-wave review with controlled-runtime tests. Packed-package tests also pass through released Pi's loader and session lifecycle, and final Wave 3 review is accepted. This is controlled qualification, not an npm release or exhaustive external-provider qualification.
 
+## Documentation
+
+- Start with [Installation and lifecycle](#installation-and-lifecycle) to load the extension explicitly; checking out this repository does not install or activate it.
+- Use [Configuration and authentication boundary](#configuration-and-authentication-boundary) for model/provider settings and existing OpenCode authentication.
+- See [DEVELOPMENT.md](DEVELOPMENT.md) for source structure, local checks and contributor workflow.
+- Coding agents working in this repository must follow [AGENTS.md](AGENTS.md).
+
 ## Development prerequisites
 
 Use Node >=22.19.0, Yarn Classic and an existing `opencode` executable on PATH. The controlled qualification pair is released, unpatched Pi 1.0.4 and OpenCode 1.18.29; other versions are not qualified. Dependencies are pinned in `yarn.lock`. No CLI, plugin or provider SDK is automatically installed by the bridge.
