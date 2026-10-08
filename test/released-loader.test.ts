@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import childProcess, { execFileSync, type ChildProcess } from "node:child_process";
-import { createServer } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
 import { copyFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -29,6 +29,8 @@ test(`packed package qualifies through released Pi loader (${responses ? "Respon
   let requests = 0, executions = 0, before = 0, after = 0;
   const requestTools: string[][] = [];
   let cancelTool = false;
+  let failureMode: "connection" | "stream" | undefined;
+  let failingResponse: ServerResponse | undefined;
   let toolStarted!: () => void;
   const cancellingTool = new Promise<void>((resolve) => { toolStarted = resolve; });
   const server = createServer(async (request, response) => {
@@ -37,6 +39,7 @@ test(`packed package qualifies through released Pi loader (${responses ? "Respon
     const payload = JSON.parse(body);
     requestTools.push((payload.tools ?? []).map((tool: { name?: string; function?: { name?: string } }) => tool.name ?? tool.function?.name ?? "unknown"));
     const tool = [1, 3, 5].includes(++requests);
+    if (failureMode === "connection") { request.socket.destroy(); return; }
     if (responses) {
       assert.equal(request.url, "/v1/responses");
       assert.deepEqual(requestTools.at(-1), ["probe"]);
@@ -58,7 +61,9 @@ test(`packed package qualifies through released Pi loader (${responses ? "Respon
         item = { type: "message", id: `msg_${requests}`, role: "assistant", status: "in_progress", content: [] };
         send({ type: "response.output_item.added", output_index: 0, item });
         send({ type: "response.content_part.added", item_id: item.id, output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } });
+        if (failureMode === "stream") failingResponse = response;
         send({ type: "response.output_text.delta", item_id: item.id, output_index: 0, content_index: 0, delta: "packed done" });
+        if (failureMode === "stream") return;
         item = { ...item, status: "completed", content: [{ type: "output_text", text: "packed done", annotations: [] }] };
       }
       send({ type: "response.output_item.done", output_index: 0, item });
@@ -108,6 +113,7 @@ test(`packed package qualifies through released Pi loader (${responses ? "Respon
     });
     settings = SettingsManager.inMemory({ packages: [packed], compaction: { enabled: false }, retry: { enabled: false } });
     const errors: string[] = [];
+    const notices: string[] = [];
     const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager: settings,
       noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
       extensionFactories: [(pi) => {
@@ -145,7 +151,7 @@ test(`packed package qualifies through released Pi loader (${responses ? "Respon
         return row;
       },
       confirm: async () => true,
-      notify: () => {},
+      notify: (message: string) => { notices.push(message); },
     } as unknown as ExtensionUIContext });
     const model = modelRuntime.getModel("opencode-bridge", `${providerID}/${modelID}`);
     assert.ok(model, errors.join("\n"));
@@ -202,6 +208,34 @@ test(`packed package qualifies through released Pi loader (${responses ? "Respon
     await session.prompt("Request after released-loader reload.");
     assert.equal(session.getLastAssistantText(), "packed done");
     assert.equal(requests, 7);
+    if (responses) {
+      const noticesBefore = notices.length;
+      const unsubscribe = session.subscribe(event => {
+        if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta" && failureMode === "stream") failingResponse?.destroy();
+      });
+      try {
+        for (const mode of ["connection", "stream"] as const) {
+          failureMode = mode;
+          const beforeRequest: number = requests;
+          await session.prompt(`Controlled ${mode} failure with PRIVATE_PROMPT_SENTINEL.`);
+          const last = session.messages.at(-1);
+          assert.ok(last?.role === "assistant" && last.stopReason === "error");
+          assert.match(last.errorMessage!, mode === "connection" ? /failed: upstream forwarding/ : /failed: upstream response streaming/);
+          assert.match(last.errorMessage!, /Code: UND_ERR_SOCKET/);
+          assert.match(last.errorMessage!, /Model: opencode\/muse-spark-1.3-contributor-free/);
+          assert.doesNotMatch(last.errorMessage!, /PRIVATE_PROMPT_SENTINEL|synthetic/);
+          if (mode === "stream") assert.ok(last.content.some(part => part.type === "text" && part.text.includes("packed done")));
+          assert.equal(requests, beforeRequest + 1, "diagnostics must not replay inference");
+          assert.equal(executions, 3, "diagnostics must not execute more tools");
+          failureMode = undefined;
+          await session.prompt("Fresh user request after diagnostic failure.");
+          assert.equal(session.getLastAssistantText(), "packed done");
+          const fresh = session.messages.at(-1);
+          assert.ok(fresh?.role === "assistant" && fresh.stopReason === "stop" && !fresh.errorMessage);
+        }
+      } finally { unsubscribe(); }
+      assert.equal(notices.length, noticesBefore, "request errors must not also create duplicate notifications");
+    }
     settings.setPackages([]);
     await session.reload();
     assert.ok(children.length >= 3, "observe actual owned OpenCode children");

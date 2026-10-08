@@ -127,6 +127,9 @@ for (const mode of ["retry", "observer", "missing-events", "selective-loss", "or
         assert.equal(requests, 2);
         const last = agent.state.messages.at(-1);
         assert.ok(last?.role === "assistant" && last.stopReason === "error");
+        assert.match(last.errorMessage!, /Cause: retry: Controlled effectful failure/);
+        assert.doesNotMatch(last.errorMessage!, /HTTP:/, "retry event does not expose the upstream status");
+        assert.match(last.errorMessage!, /Tools: 1 handoff\(s\), 1 result\(s\) returned/);
       } else if (mode !== "ordered") {
         if (mode === "observer") {
           await finalResponse.promise;
@@ -139,10 +142,14 @@ for (const mode of ["retry", "observer", "missing-events", "selective-loss", "or
         assert.equal(executions, 1);
         const last = agent.state.messages.at(-1);
         assert.ok(last?.role === "assistant" && last.stopReason === "error");
-        assert.match(last.errorMessage!, /no automatic replay/);
+        assert.match(last.errorMessage!, /no automatic replay/i);
+        assert.match(last.errorMessage!, /completed-history reconciliation/);
         if (mode === "selective-loss") assert.deepEqual(last.content, [{ type: "text", text: "FINAL" }]);
         const replay = await seam.streamSimple(model, lastContext!).result();
         assert.equal(replay.stopReason, "error");
+        assert.match(replay.errorMessage!, /failed: blocked replay/);
+        assert.match(replay.errorMessage!, /Original operation: completed-history reconciliation/);
+        assert.match(replay.errorMessage!, /Tools: 1 handoff\(s\), 1 result\(s\) returned/);
         assert.equal(requests, 2, "failed context must not automatically replay");
         await agent.prompt("Start a new user-directed request.");
         const fresh = agent.state.messages.at(-1);

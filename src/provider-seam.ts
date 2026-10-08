@@ -11,7 +11,7 @@ import {
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import type { Config } from "@opencode-ai/sdk";
-import { backendFailure, BridgeFailure } from "./failure.ts";
+import { backendFailure, BridgeFailure, requestFailure, renderFailure } from "./failure.ts";
 import { GenerationStream } from "./stream.ts";
 import { backendContext, imagePart, isAppendCompatible } from "./context.ts";
 import { BRIDGE_AGENT } from "./configuration.ts";
@@ -26,6 +26,9 @@ interface Turn {
   session?: string;
   done: boolean;
   error?: Error;
+  diagnostic?: BridgeFailure;
+  handoffs: number;
+  results: number;
   output: GenerationStream;
   finish: "stop" | "length";
   requestID: string;
@@ -60,7 +63,7 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
   });
-  let failedContext: string | undefined;
+  let failedContext: { fingerprint: string; failure: BridgeFailure; handoffs: number; results: number } | undefined;
   let retained: { session: string; messages: Message[] } | undefined;
   const relay = await createToolRelay(options.tools, (call) => {
     if (!turn || turn.done || turn.controller.signal.aborted) { call.cancel(); return; }
@@ -74,14 +77,21 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
   agent.tools = { "*": false, ...Object.fromEntries(options.tools.map((tool) => [`pi_${tool.name}`, true])) };
   let runtime: Awaited<ReturnType<typeof startOwnedRuntime>>;
   let inferenceRelay: Awaited<ReturnType<typeof startInferenceRelay>>;
+  let startupOperation = "inference relay startup";
   try {
     inferenceRelay = await startInferenceRelay(config, options.tools, options.providerID, options.modelID,
-      { ...process.env, ...options.environment });
+      { ...process.env, ...options.environment }, () => {
+        const active = turn;
+        return (failure) => {
+          if (active && turn === active && !active.done && !active.controller.signal.aborted) active.diagnostic ??= failure;
+        };
+      });
+    startupOperation = "runtime startup";
     runtime = await startOwnedRuntime({ ...options, config });
   } catch (error) {
     await inferenceRelay?.close();
     await relay.close();
-    throw error;
+    throw requestFailure(error, startupOperation);
   }
 
   const cancel = (active: Turn): void => {
@@ -90,7 +100,7 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
     active.controller.abort();
     for (const remove of active.abortBindings) remove();
     active.abortBindings.clear();
-    active.error = new Error("Pi request aborted");
+    active.error ??= new Error("Pi request aborted");
     active.done = true;
     const pending = active.queue.splice(0);
     if (active.emitted) pending.push(active.emitted);
@@ -133,13 +143,17 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
     // the independent reader responsible for retry/cancellation supervision.
     active.observations = active.observations.then(async () => {
       if (active.controller.signal.aborted) return;
-      await active.observe?.(event);
+      try { await active.observe?.(event); }
+      catch (error) { throw requestFailure(error, "stream observation"); }
       if (active.controller.signal.aborted) return;
-      apply();
+      try { apply(); }
+      catch (error) { throw requestFailure(error, "stream normalization"); }
       active.wake?.();
-    }).catch(() => {
+    }).catch((error) => {
+      if (active.controller.signal.aborted) return;
+      active.diagnostic ??= requestFailure(error, "stream observation");
+      active.error = active.diagnostic;
       cancel(active);
-      active.error = new BridgeFailure("stream", "OpenCode stream observation or normalization failed; no automatic replay was performed.");
     });
   };
 
@@ -150,9 +164,7 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
   const connected = new Promise<void>((resolve) => { ready = resolve; });
   let eventPump: Promise<void>;
   try {
-    const response = await fetchRuntime(`${runtime.url}/event`, { signal: eventsController.signal }).catch((error: Error & { cause?: { code?: string; message?: string } }) => {
-      throw new Error(`OpenCode event connection failed at ${runtime.url} (${error.cause?.code ?? error.cause?.message ?? "unknown transport failure"})`);
-    });
+    const response = await fetchRuntime(`${runtime.url}/event`, { signal: eventsController.signal });
     if (!response.ok || !response.body) throw new Error("Cannot subscribe to OpenCode runtime events");
     eventPump = (async () => {
       let buffer = "";
@@ -173,7 +185,11 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
             retained = undefined;
             monitored = false;
             unavailableReason = "OpenCode backend history changed unexpectedly; reload the bridge to rebuild Pi-owned context.";
-            if (turn) cancel(turn);
+            if (turn) {
+              turn.diagnostic ??= requestFailure(new Error(unavailableReason), "backend history monitoring");
+              turn.error = turn.diagnostic;
+              cancel(turn);
+            }
             notify();
           }
           const active = turn;
@@ -199,15 +215,28 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
           }
           if (turn && event.properties?.sessionID === turn.session &&
               ((event.type === "session.status" && event.properties.status?.type === "retry") || event.type === "session.error")) {
-            cancel(turn);
-            turn.error = backendFailure(event.properties.error ?? event.properties.status);
+            if (!turn.controller.signal.aborted) {
+              turn.diagnostic ??= requestFailure(backendFailure(event.properties.error ?? event.properties.status), "backend inference");
+              turn.error = turn.diagnostic;
+              cancel(turn);
+            }
           }
         }
       }
-    })().finally(() => {
+    })().catch((error) => {
+      if (turn && !closed && !turn.controller.signal.aborted) {
+        turn.diagnostic ??= requestFailure(error, "event monitoring");
+        turn.error = turn.diagnostic;
+      }
+      throw error;
+    }).finally(() => {
       if (!closed) {
         monitored = false;
-        if (turn) cancel(turn);
+        if (turn && !turn.controller.signal.aborted) {
+          turn.diagnostic ??= requestFailure(new Error(unavailableReason), "event monitoring");
+          turn.error = turn.diagnostic;
+          cancel(turn);
+        }
         notify();
       }
     });
@@ -223,18 +252,20 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
     await runtime.close();
     await inferenceRelay?.close();
     await relay.close();
-    throw error;
+    throw requestFailure(error, "event connection");
   }
 
   const begin = (model: Model<string>, context: TranscriptContext, streamOptions: SimpleStreamOptions): Turn => {
-    const active: Turn = { queue: [], done: false, observations: Promise.resolve(), observationsClosed: false, output: new GenerationStream(), finish: "stop", requestID: `msg_${randomUUID().replaceAll("-", "")}`, assistantIDs: new Set(),
+    const active: Turn = { queue: [], done: false, handoffs: 0, results: 0, observations: Promise.resolve(), observationsClosed: false, output: new GenerationStream(), finish: "stop", requestID: `msg_${randomUUID().replaceAll("-", "")}`, assistantIDs: new Set(),
       observe: streamOptions.onProviderStreamEvent ? async (event) => { await streamOptions.onProviderStreamEvent!(event, model); } : undefined,
       userKey: JSON.stringify([...context.messages].reverse().find((message) => message.role === "user")), controller: new AbortController(), abortBindings: new Set() };
     bindAbort(active, streamOptions.signal);
     void (async () => {
+      let operation = "context preparation";
       try {
         const compatible = retained && isAppendCompatible(retained.messages, context.messages);
         const prompt = backendContext(context, model.input.includes("image"), !!compatible);
+        operation = "session creation";
         active.session = compatible ? retained!.session : (await runtime.client.session.create({
           body: { title: "Pi bridge inference" }, throwOnError: true, signal: active.controller.signal,
         })).data.id;
@@ -242,16 +273,20 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
           model: { providerID: options.providerID, modelID: options.modelID },
           agent: BRIDGE_AGENT, messageID: active.requestID, ...prompt,
         };
+        operation = "payload observation";
         const replacement = await streamOptions.onPayload?.(body, model);
+        operation = "prompt submission";
         const response = await runtime.client.session.prompt({
           path: { id: active.session }, body: (replacement ?? body) as typeof body,
           throwOnError: true, signal: active.controller.signal,
           fetch: async (request) => {
             const response = await fetchRuntime(request);
-            await streamOptions.onResponse?.({ status: response.status, headers: Object.fromEntries(response.headers) }, model);
+            try { await streamOptions.onResponse?.({ status: response.status, headers: Object.fromEntries(response.headers) }, model); }
+            catch (error) { throw requestFailure(error, "response observation"); }
             return response;
           },
         });
+        operation = "response processing";
         if (response.data.info.error) throw backendFailure(response.data.info.error);
         active.finish = response.data.info.finish === "length" ? "length" : "stop";
         active.observationsClosed = true;
@@ -265,8 +300,10 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
         });
         // Prompt returns only the final assistant. Persisted request-owned history
         // is the completion boundary for all earlier steps, independent of SSE lag.
+        operation = "completed-history retrieval";
         const history = await runtime.client.session.messages({ path: { id: active.session },
           throwOnError: true, signal: active.controller.signal });
+        operation = "completed-history reconciliation";
         const ownedMessages = history.data.filter((entry) => entry.info.role === "assistant" && entry.info.parentID === active.requestID)
           .sort((a, b) => a.info.time.created - b.info.time.created || a.info.id.localeCompare(b.info.id));
         if (!ownedMessages.some((entry) => entry.info.id === response.data.info.id)) throw new BridgeFailure("stream", "OpenCode completed history is unavailable; no automatic replay was performed.");
@@ -283,9 +320,9 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
         }
         active.output.reconcile(content);
       } catch (error) {
-        const failure = active.error instanceof BridgeFailure ? active.error : error instanceof Error ? error : new Error("OpenCode inference failed");
+        active.diagnostic ??= requestFailure(error, operation);
+        active.error = active.diagnostic;
         cancel(active);
-        active.error = failure;
       } finally {
         active.done = true;
         active.wake?.();
@@ -306,21 +343,26 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
     void (async () => {
       let owned: Turn | undefined;
       let started = false;
+      let blocked = false;
+      let rejected: Turn | undefined;
+      let operation = "request availability";
       try {
-        if (closed || !monitored) throw new Error("OpenCode bridge is unavailable");
         const fingerprint = createHash("sha256").update(JSON.stringify(context.messages)).digest("hex");
-        if (failedContext === fingerprint) throw new Error("Failed generation cannot resume automatically");
+        if (failedContext?.fingerprint === fingerprint) { blocked = true; throw failedContext.failure; }
+        if (closed || !monitored) throw new Error(unavailableReason);
         const userKey = JSON.stringify([...context.messages].reverse().find((message) => message.role === "user"));
         // A generation holds the lane across tool segments. Only its matching result
         // may bypass independent requests waiting for the whole generation to finish.
         for (;;) {
-          if (closed || !monitored) throw new Error("OpenCode bridge is unavailable");
+          if (closed || !monitored) throw new Error(unavailableReason);
           const result = turn && !turn.done && !turn.error && turn.userKey === userKey && turn.emitted &&
             context.messages.find((item) => item.role === "toolResult" && item.toolCallId === turn!.emitted!.call.id);
           if (!segmentBusy && result && result.role === "toolResult") {
             owned = turn!;
             segmentBusy = true;
             bindAbort(owned, streamOptions.signal);
+            operation = "tool-result continuation";
+            owned.results++;
             if (owned.error) throw owned.error;
             for (const part of result.content) if (part.type === "image") {
               if (!model.input.includes("image")) throw new BridgeFailure("unsupported", "OpenCode bridge selected model does not support image results");
@@ -341,10 +383,11 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
             segmentBusy = true;
             break;
           }
-          if (!segmentBusy && turn?.error) throw turn.error;
+          if (!segmentBusy && turn?.error) { rejected = turn; blocked = true; throw turn.error; }
           await wait(streamOptions.signal);
         }
         const active = owned;
+        operation = "stream normalization";
         stream.push({ type: "start", partial: message });
         started = true;
         while (!active.queue.length && !active.done) {
@@ -358,6 +401,7 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
         if (call) {
           active.output.handoff();
           active.emitted = call;
+          active.handoffs++;
           const contentIndex = message.content.length;
           message.content.push(call.call);
           message.stopReason = "toolUse";
@@ -371,15 +415,20 @@ export async function createProviderSeam(options: OwnedRuntimeOptions & {
           turn = undefined;
         }
       } catch (error) {
+        const source = owned ?? rejected;
+        const failure = source?.diagnostic ?? requestFailure(error, operation);
         if (owned) {
           if (started) owned.output.finish(message, (event) => stream.push(event));
-          failedContext = createHash("sha256").update(JSON.stringify(context.messages)).digest("hex");
+          failedContext = { fingerprint: createHash("sha256").update(JSON.stringify(context.messages)).digest("hex"),
+            failure, handoffs: owned.handoffs, results: owned.results };
           cancel(owned);
         }
         message.stopReason = streamOptions.signal?.aborted ? "aborted" : "error";
-        message.errorMessage = message.stopReason === "aborted" ? "Pi request aborted" : error instanceof BridgeFailure
-          ? error.message : !monitored ? unavailableReason
-          : "OpenCode bridge request failed; no automatic replay was performed";
+        message.errorMessage = message.stopReason === "aborted" ? "Pi request aborted" : renderFailure(failure, {
+          operation, model: `${options.providerID}/${options.modelID}`, blocked,
+          handoffs: source?.handoffs ?? (blocked ? failedContext?.handoffs : 0),
+          results: source?.results ?? (blocked ? failedContext?.results : 0),
+        });
         stream.push({ type: "error", reason: message.stopReason, error: message });
       } finally {
         if (owned) segmentBusy = false;

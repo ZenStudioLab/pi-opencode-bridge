@@ -69,6 +69,17 @@ test("provider entry preserves catalog on failed refresh and rejects removed sel
     await agent.prompt("Fresh entry after Pi context transition.");
     assert.equal(agent.state.errorMessage, undefined);
     assert.equal(requests, 3);
+    await handlers.get("model_select")!({}, ctx);
+    const path = process.env.PATH;
+    process.env.PATH = home;
+    try {
+      const failed = await registered!.streamSimple!(selected, normalizeContext({ messages: [{ role: "user", content: "startup failure", timestamp: 3 }] }), {}).result();
+      assert.equal(failed.stopReason, "error");
+      assert.match(failed.errorMessage!, /failed: runtime startup/);
+      assert.match(failed.errorMessage!, /ENOENT/);
+      assert.match(failed.errorMessage!, /Model: fixture\/probe/);
+      assert.equal(requests, 3);
+    } finally { process.env.PATH = path; }
     const previous = registered;
     process.env.OPENCODE_CONFIG_CONTENT = "{ invalid JSON";
     await commands.get("opencode-refresh")!.handler("", ctx);
@@ -79,7 +90,10 @@ test("provider entry preserves catalog on failed refresh and rejects removed sel
     assert.equal(registered!.models!.length, 0);
     const result = await registered!.streamSimple!(selected, normalizeContext({ messages: [{ role: "user", content: "unchanged prompt", timestamp: 1 }] }), {}).result();
     assert.equal(result.stopReason, "error");
-    assert.match(result.errorMessage!, /selection were preserved/);
+    assert.match(result.errorMessage!, /failed: request startup/);
+    assert.match(result.errorMessage!, /Cause: Error: OpenCode bridge model unavailable/);
+    assert.equal(selected.id, "fixture/probe");
+    assert.equal(requests, 3);
   } finally {
     await handlers.get("session_shutdown")?.({}, ctx);
     for (const key of Object.keys(process.env)) if (!(key in environment)) delete process.env[key];

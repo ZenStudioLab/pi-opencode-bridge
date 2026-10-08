@@ -57,6 +57,11 @@ for (const scenario of [
       assert.equal(events.filter((event) => event === "done" || event === "error").length, 1);
       assert.equal(result.stopReason, "error");
       assert.match(result.errorMessage!, scenario.expected);
+      assert.match(result.errorMessage!, /Model: fixture\/probe/);
+      assert.match(result.errorMessage!, /Tools: no handoff issued/);
+      if (scenario.status === 401 || scenario.status === 403) assert.ok(result.errorMessage!.includes(`HTTP: ${scenario.status}`));
+      // OpenCode's retry and ContextOverflowError events omit the original HTTP status.
+      if (scenario.status === 429 || scenario.status === 400) assert.doesNotMatch(result.errorMessage!, /HTTP:/);
       assert.doesNotMatch(result.errorMessage!, /synthetic-secret|preserved prompt/);
       assert.deepEqual(context, original);
       assert.equal(requests, 1);

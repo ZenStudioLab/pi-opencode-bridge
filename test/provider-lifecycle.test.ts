@@ -183,6 +183,43 @@ test(`remote abort ${failureMode} retires the owned runtime without contaminatin
 
 }
 
+test("failure while a Pi handoff is outstanding reports uncertain effects without replay", { timeout: 30_000 }, async (t) => {
+  let events: IncomingMessage | undefined;
+  let sessionID: string | undefined;
+  const original = http.request;
+  t.mock.method(http, "request", (...args: Parameters<typeof original>) => {
+    const request = original(...args);
+    if (args[0] instanceof URL) {
+      if (args[0].pathname === "/event") request.once("response", response => { events = response; });
+      sessionID ??= args[0].pathname.match(/^\/session\/([^/]+)\/message$/)?.[1];
+    }
+    return request;
+  });
+  syncBuiltinESMExports();
+  let f: Awaited<ReturnType<typeof fixture>> | undefined;
+  try {
+    f = await fixture((response, request) => reply(response, request === 1 ? 1 : 0));
+    const input = context("Hold the tool result.");
+    const handoff = await f.seam.streamSimple(model, input).result();
+    assert.equal(handoff.stopReason, "toolUse");
+    assert.ok(events && sessionID);
+    events.push(Buffer.from(`data: ${JSON.stringify({ type: "session.error", properties: { sessionID, error: { name: "APIError", data: { statusCode: 502, message: "Controlled handoff failure" } } } })}\n\n`));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    const failed = await f.seam.streamSimple(model, normalizeContext({ messages: [...input.messages, handoff] })).result();
+    assert.equal(failed.stopReason, "error");
+    assert.match(failed.errorMessage!, /Tools: 1 handoff\(s\), 0 result\(s\) returned/);
+    assert.match(failed.errorMessage!, /execution may have occurred/);
+    assert.match(failed.errorMessage!, /Controlled handoff failure/);
+    assert.equal(f.requests(), 1);
+    assert.equal((await f.seam.streamSimple(model, context("New request after failure")).result()).stopReason, "stop");
+    assert.equal(f.requests(), 2);
+  } finally {
+    await f?.close();
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+});
+
 for (const change of ["disconnect", "compaction"] as const) {
 test(`backend ${change} between turns prevents stale inference`, { timeout: 30_000 }, async (t) => {
   let events: IncomingMessage | undefined;

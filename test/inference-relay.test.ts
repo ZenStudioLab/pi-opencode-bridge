@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
 import { test } from "node:test";
 import type { Config } from "@opencode-ai/sdk";
 import { Type } from "typebox";
 import { startInferenceRelay } from "../src/inference-relay.ts";
+import { renderFailure, type BridgeFailure } from "../src/failure.ts";
 
 const model = "muse-spark-1.3-contributor-free";
 const tools = [{ name: "read", description: "Read fixture", parameters: Type.Object({}) }];
@@ -125,7 +126,8 @@ test("closing the relay aborts an outstanding upstream stream", { timeout: 5_000
   const address = upstream.address();
   assert.ok(address && typeof address !== "string");
   const config: Config = { provider: { opencode: { options: { baseURL: `http://127.0.0.1:${address.port}/v1` } } } };
-  const relay = await startInferenceRelay(config, tools, "opencode", model);
+  const failures: BridgeFailure[] = [];
+  const relay = await startInferenceRelay(config, tools, "opencode", model, {}, () => failure => failures.push(failure));
   assert.ok(relay);
   try {
     const request = fetch(`${relay.baseURL}/responses`, { method: "POST", body: '{"tools":[]}' }).then(response => response.text());
@@ -134,6 +136,65 @@ test("closing the relay aborts an outstanding upstream stream", { timeout: 5_000
     await relay.close();
     await rejected;
     await ended;
+    assert.deepEqual(failures, [], "owned close must not report an intentional abort as a backend failure");
+  } finally {
+    await relay.close();
+    upstream.closeAllConnections();
+    await new Promise<void>(resolve => upstream.close(() => resolve()));
+  }
+});
+
+test("relay captures originating causes before headers and after stream delivery without leaking payloads", { timeout: 10_000 }, async () => {
+  let mode: "transport" | "malformed" | "stream" | "success" = "transport";
+  let upstreamResponse: ServerResponse | undefined;
+  const upstream = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* Consume fixture input. */ }
+    if (mode === "transport") { request.socket.destroy(); return; }
+    if (mode === "stream") {
+      upstreamResponse = response;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(": first frame\n\n");
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(mode === "malformed" ? 'SECRET_PAYLOAD_NOT_JSON' : '{"output":[]}');
+  });
+  await new Promise<void>(resolve => upstream.listen(0, "127.0.0.1", resolve));
+  const address = upstream.address();
+  assert.ok(address && typeof address !== "string");
+  const config: Config = { provider: { opencode: { options: { baseURL: `http://127.0.0.1:${address.port}/v1` } } } };
+  const failures: { owner: number; failure: BridgeFailure }[] = [];
+  let owner = 0;
+  const relay = await startInferenceRelay(config, tools, "opencode", model, {}, () => {
+    const captured = ++owner;
+    return failure => { failures.push({ owner: captured, failure }); };
+  });
+  assert.ok(relay);
+  const send = () => fetch(`${relay.baseURL}/responses`, { method: "POST", body: "{}" });
+  try {
+    const failed = await send();
+    assert.equal(failed.status, 502);
+    assert.equal(failures[0].failure.operation, "upstream forwarding");
+    assert.equal(failures[0].failure.details.code, "UND_ERR_SOCKET");
+    assert.equal(failures[0].failure.details.status, undefined, "local gateway status is not an upstream HTTP failure");
+    assert.doesNotMatch(await failed.text(), /UND_ERR_SOCKET/, "details stay in the owning Pi process");
+    mode = "malformed";
+    assert.equal((await send()).status, 502);
+    assert.equal(failures[1].failure.operation, "upstream response processing");
+    assert.equal(failures[1].failure.details.name, "SyntaxError");
+    assert.doesNotMatch(renderFailure(failures[1].failure, { operation: "unused", model }), /SECRET_PAYLOAD/);
+    mode = "stream";
+    const response = await send();
+    const reader = response.body!.getReader();
+    assert.equal(new TextDecoder().decode((await reader.read()).value), ": first frame\n\n");
+    const rejected = assert.rejects(reader.read());
+    upstreamResponse!.destroy();
+    await rejected;
+    assert.equal(failures[2].failure.operation, "upstream response streaming");
+    assert.equal(failures[2].failure.details.code, "UND_ERR_SOCKET");
+    mode = "success";
+    assert.equal((await send()).status, 200);
+    assert.deepEqual(failures.map(entry => entry.owner), [1, 2, 3], "later success must not reuse a stale failure");
   } finally {
     await relay.close();
     upstream.closeAllConnections();

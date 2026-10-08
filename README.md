@@ -57,6 +57,23 @@ Request payload/response hooks describe the bridge's owned OpenCode HTTP request
 
 ## Recovery
 
+Request errors show the selected provider/model, failing operation and available safe source error type/message, HTTP status and transport cause code. For example, this **synthetic** failure illustrates the format, not the cause of any reported Muse incident:
+
+```text
+OpenCode request failed: upstream forwarding
+Model: opencode/muse-spark-1.3-contributor-free
+OpenCode inference failed.
+Cause: TypeError: fetch failed
+Code: ECONNRESET
+Underlying cause: Error: ECONNRESET: connection reset
+Tools: no handoff issued
+No automatic replay was performed.
+```
+
+Diagnostics read selected error metadata, not complete exception objects or backend stderr. Credential-bearing fields, URLs and quoted/payload-like text are redacted or withheld; oversized details are truncated. Missing detail is explicitly unavailable. Pi may save the displayed sanitized error in its ordinary session, but the bridge creates no separate raw log. An error message is not permission to retry a tool operation or evidence that provider access is available.
+
+Tool status distinguishes an issued handoff from a returned result: no returned result does **not** prove no side effect occurred, and a returned result does not imply success. Blocked continuations identify the original failed operation without sending a new request. Intentional cancellation remains an aborted outcome, not an extra error notification; valid partial text remains visible after failures. OpenCode sometimes omits HTTP status from retry/context-overflow events, so those diagnostics retain the available type/message rather than guessing a status.
+
 Authentication/entitlement rejection, free-tier client restrictions, rate limiting and context overflow use evidenced, sanitized diagnostics without changing the prompt or model. An evidenced `FreeTierError` is reported as a client restriction, not a request to repair credentials. Cancellation blocks new ownership until OpenCode acknowledges retirement. Failed/timed-out retirement stops the owned runtime; lost event monitoring also makes the seam unavailable. Reload the bridge before a fresh user request in those cases. Successful ordinary cancellation permits a fresh user-directed request without replaying the cancelled tool. No automatic provider fallback or effectful replay is performed.
 
 ## Installation and lifecycle
@@ -77,6 +94,8 @@ The initial approved Muse smoke was rejected before tool execution. Subsequent d
 For `opencode/muse-spark-1.3-contributor-free` on the OpenAI Responses SDK route, an owned loopback adapter now exposes only the current Pi tools under their original names upstream and restores MCP names in model responses. It also translates retained function-call history and selected-tool references. IDs, arguments, results, prompt, credentials and configured upstream endpoint remain unchanged. Native OpenCode tools remain disabled; no placeholder tool, plugin, fallback or automatic replay is introduced. Other model/SDK routes are untouched.
 
 The integrated implementation passed an explicitly approved synthetic live round trip: two HTTP 200 responses, one Pi-owned fixture read, final `pong`. Only constrained `bash` and `read` tools were offered; `bash` was not executed. Read-only tool declarations had still been rejected in earlier experiments, so this does not guarantee acceptance for every tool set or continued availability under the vendor's free-tier policy. The packed-loader test covers this adapter with a controlled Responses fixture as well as the original chat fixture. Wave 4's final independent review and caller acceptance passed after correcting configured-endpoint precedence.
+
+Muse relay diagnostics retain the originating connection, response-processing or stream failure in memory for the owning request, including failures after headers. A local gateway failure is not represented as an upstream HTTP status, and later requests do not inherit stale failures. Controlled loopback tests exercise this through the packed Pi loader; improved diagnostics do not establish current external entitlement or resolve the cause of a previously reported generic failure.
 
 The Contributor tier permits prompt/completion use for training. External checks require explicit prompt-egress approval and current pricing/terms checks; the ordinary test suite never calls it.
 

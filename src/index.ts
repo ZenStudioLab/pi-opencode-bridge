@@ -9,6 +9,7 @@ import { createProviderSeam } from "./provider-seam.ts";
 import { startOwnedRuntime } from "./runtime.ts";
 import { modelEnabled, readModelPreferences, writeModelPreferences, type ModelPreferences } from "./model-preferences.ts";
 import { showModelSettings } from "./model-settings.ts";
+import { renderFailure } from "./failure.ts";
 
 export default function registerPiOpenCodeBridge(pi: ExtensionAPI): void {
   let inherited: Awaited<ReturnType<typeof loadProviderConfiguration>> | undefined;
@@ -52,10 +53,10 @@ export default function registerPiOpenCodeBridge(pi: ExtensionAPI): void {
                 try { await opening; } finally { opening = undefined; }
               }
               for await (const event of seam!.streamSimple(model, context, options)) output.push(event);
-            } catch {
+            } catch (cause) {
               const error: AssistantMessage = { role: "assistant", api: model.api, provider: model.provider, model: model.id,
                 timestamp: Date.now(), content: [], stopReason: options?.signal?.aborted ? "aborted" : "error",
-                errorMessage: "OpenCode bridge could not start the selected model; configuration and selection were preserved",
+                errorMessage: options?.signal?.aborted ? "Pi request aborted" : renderFailure(cause, { operation: "request startup", model: model.id }),
                 usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
               output.push({ type: "error", reason: error.stopReason === "aborted" ? "aborted" : "error", error });
             } finally { output.end(); }

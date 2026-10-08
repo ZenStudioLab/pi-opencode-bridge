@@ -4,13 +4,15 @@ import { pipeline } from "node:stream/promises";
 import type { Config } from "@opencode-ai/sdk";
 import type { Tool } from "@earendil-works/pi-ai";
 import { responsesToolNames } from "./responses-tool-names.ts";
+import { requestFailure, type BridgeFailure } from "./failure.ts";
 
 const MUSE = "muse-spark-1.3-contributor-free";
 const HOP_HEADERS = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"]);
 
 /** The qualified Responses route only; every other model retains its existing transport. */
 export async function startInferenceRelay(config: Config, tools: readonly Tool[], providerID: string, modelID: string,
-  environment: NodeJS.ProcessEnv = process.env) {
+  environment: NodeJS.ProcessEnv = process.env,
+  captureFailure?: () => ((failure: BridgeFailure) => void) | undefined) {
   if (providerID !== "opencode" || modelID !== MUSE) return undefined;
   const provider = config.provider?.opencode;
   // Pinned runtime supports model.provider.api; the SDK's v1 Config omits it.
@@ -34,6 +36,14 @@ export async function startInferenceRelay(config: Config, tools: readonly Tool[]
   const active = new Set<AbortController>();
   const server = createServer(async (request, response) => {
     const controller = new AbortController();
+    const reportFailure = captureFailure?.(); // Capture ownership before asynchronous forwarding.
+    let operation = "relay request processing";
+    let reported = false;
+    const report = (error: unknown): void => {
+      if (reported || controller.signal.aborted) return;
+      reported = true;
+      reportFailure?.(requestFailure(error, operation));
+    };
     active.add(controller);
     request.once("aborted", () => controller.abort());
     response.once("close", () => { if (!response.writableFinished) controller.abort(); });
@@ -50,6 +60,7 @@ export async function startInferenceRelay(config: Config, tools: readonly Tool[]
         if (value === undefined || HOP_HEADERS.has(key) || ["host", "content-length", "accept-encoding"].includes(key)) continue;
         headers.set(key, Array.isArray(value) ? value.join(", ") : value);
       }
+      operation = "upstream forwarding";
       const result = await fetch(upstream, { method: "POST", headers, body: JSON.stringify(body), signal: controller.signal });
       for (const [key, value] of result.headers) {
         if (!HOP_HEADERS.has(key) && !["content-length", "content-encoding"].includes(key)) response.setHeader(key, value);
@@ -57,16 +68,22 @@ export async function startInferenceRelay(config: Config, tools: readonly Tool[]
       response.statusCode = result.status;
       const contentType = result.headers.get("content-type") ?? "";
       if (result.ok && contentType.includes("application/json")) {
+        operation = "upstream response processing";
         const value: unknown = await result.json();
         names.response(value);
         response.end(JSON.stringify(value));
       } else if (result.body) {
+        operation = "upstream response streaming";
         const body = result.ok && contentType.includes("text/event-stream")
           ? result.body.pipeThrough(new TextDecoderStream()).pipeThrough(names.stream()).pipeThrough(new TextEncoderStream())
           : result.body;
-        await pipeline(Readable.from(body), response, { signal: controller.signal });
+        const source = Readable.from(body);
+        // Capture the upstream cause before pipeline destroys the downstream response.
+        source.once("error", report);
+        await pipeline(source, response, { signal: controller.signal });
       } else response.end();
-    } catch {
+    } catch (error) {
+      report(error);
       if (!response.headersSent && !response.destroyed) {
         response.writeHead(502, { "content-type": "application/json" });
         response.end(JSON.stringify({ error: { message: "OpenCode bridge inference transport failed" } }));
