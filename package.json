@@ -16,7 +16,7 @@
     "test": "node --experimental-strip-types --test test/*.test.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "1.32.0",
     "@opencode-ai/sdk": "1.18.29",
     "zod": "4.1.8"
   },
